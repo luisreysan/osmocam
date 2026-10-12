@@ -8,6 +8,8 @@ from collections.abc import Callable
 
 import av
 
+from .util import log
+
 
 class H264Decoder(threading.Thread):
     """Decodes the access units the datalink hands over (one complete frame each) and passes every
@@ -21,8 +23,9 @@ class H264Decoder(threading.Thread):
         # from piling up seconds of stale frames, which would show up as lag.
         self._queue: queue.Queue[tuple[bytes, float] | None] = queue.Queue(maxsize=90)
         self.frames = 0
-        self.errors = 0
+        self.errors = 0               # access units FFmpeg could not decode
         self.dropped = 0
+        self.callback_errors = 0
 
     def feed(self, data: bytes, first_packet: float = 0.0) -> None:
         try:
@@ -59,8 +62,15 @@ class H264Decoder(threading.Thread):
                 continue
             data, first_packet = item
             try:
-                for index, frame in enumerate(codec.decode(av.Packet(data))):
-                    self.frames += 1
-                    self.on_frame(frame, first_packet if index == 0 else 0.0)
+                frames = codec.decode(av.Packet(data))
             except av.error.FFmpegError:
                 self.errors += 1
+                continue
+            for index, frame in enumerate(frames):
+                self.frames += 1
+                try:
+                    self.on_frame(frame, first_packet if index == 0 else 0.0)
+                except Exception as error:  # noqa: BLE001 - a failing consumer must not stop the decoder
+                    self.callback_errors += 1
+                    if self.callback_errors == 1:
+                        log(f"Could not deliver a decoded frame: {error!r}")

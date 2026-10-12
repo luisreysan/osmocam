@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import io
 import sys
 import threading
@@ -63,6 +64,8 @@ class Outputs:
         self.seq = 0
         self.cond = threading.Condition()
         self.latency = Latency()
+        self._vcam_lock = threading.Lock()   # the decoder thread sends while the main thread may close
+        self._closed = False
 
     def on_frame(self, frame: av.VideoFrame, first_packet: float = 0.0) -> None:
         if self.use_vcam:
@@ -77,17 +80,23 @@ class Outputs:
     def _to_vcam(self, frame: av.VideoFrame) -> None:
         import pyvirtualcam
 
-        if self.cam is None:
-            self.cam = pyvirtualcam.Camera(frame.width, frame.height, self.fps,
-                                           fmt=pyvirtualcam.PixelFormat.I420, backend="obs")
-            log(f"Virtual camera ready: {self.cam.device} {frame.width}x{frame.height} @ {self.fps} fps")
-        if (frame.width, frame.height) != (self.cam.width, self.cam.height) or frame.format.name != "yuv420p":
-            frame = frame.reformat(width=self.cam.width, height=self.cam.height, format="yuv420p")
-        self.cam.send(frame.to_ndarray())
+        with self._vcam_lock:
+            if self._closed:
+                return
+            if self.cam is None:
+                self.cam = pyvirtualcam.Camera(frame.width, frame.height, self.fps,
+                                               fmt=pyvirtualcam.PixelFormat.I420, backend="obs")
+                log(f"Virtual camera ready: {self.cam.device} {frame.width}x{frame.height} @ {self.fps} fps")
+            if (frame.width, frame.height) != (self.cam.width, self.cam.height) or frame.format.name != "yuv420p":
+                frame = frame.reformat(width=self.cam.width, height=self.cam.height, format="yuv420p")
+            self.cam.send(frame.to_ndarray())
 
     def close(self) -> None:
-        if self.cam is not None:
-            self.cam.close()
+        with self._vcam_lock:
+            self._closed = True
+            if self.cam is not None:
+                self.cam.close()
+                self.cam = None
 
 
 def start_preview(outputs: Outputs, port: int) -> None:
@@ -168,6 +177,8 @@ async def run(args: argparse.Namespace) -> None:
         home = ""                    # started while still on a camera's network: nothing to return to
     deadline = time.monotonic() + args.seconds if args.seconds else None
     link: ble.BleLink | None = None
+    session: datalink.Datalink | None = None
+    task: asyncio.Future | None = None
     joined = False
 
     def time_up() -> bool:
@@ -232,13 +243,25 @@ async def run(args: argparse.Namespace) -> None:
                 log(f"Live view session ended: {error}")
             if not time_up():
                 await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        log("Ctrl+C: stopping...")
+        raise
     finally:
+        # Shut down in order: end the live view session (its thread would otherwise keep Python from
+        # exiting), stop the decoder before closing the virtual camera it writes to, then give the Wi-Fi
+        # back and release the camera.
+        if session is not None:
+            session.stop()
+        if task is not None and not task.done():
+            await asyncio.wait({task}, timeout=2)
         stop.set()
+        decoder.join(timeout=2)
         outputs.close()
         if joined:
-            wifi.restore(home, args.interface)
+            await asyncio.to_thread(wifi.restore, home, args.interface)
         if link is not None:
-            await link.close()
+            with contextlib.suppress(Exception):
+                await link.close()
         log(f"Stopped. frames={decoder.frames} decode_errors={decoder.errors}")
 
 
