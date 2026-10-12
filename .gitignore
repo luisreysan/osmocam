@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.part
+*.h264
+vcam_frame.jpg
+cameras.json

@@ -1,0 +1,5 @@
+bleak>=1.0
+av>=14
+numpy>=2.0
+pillow>=10
+pyvirtualcam>=0.12
