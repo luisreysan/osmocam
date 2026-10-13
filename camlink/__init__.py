@@ -1,4 +1,4 @@
-"""camlink: talk to DJI Osmo cameras from Windows over Bluetooth LE and Wi-Fi.
+"""camlink: talk to DJI Osmo cameras from Windows, macOS or Linux over Bluetooth LE and Wi-Fi.
 
 Unofficial and independent; not affiliated with DJI. The protocol is described in docs/PROTOCOL.md.
 
@@ -6,10 +6,10 @@ Unofficial and independent; not affiliated with DJI. The protocol is described i
     duml       message framing (CRCs, encoder, stream reader)
     models     which camera is advertising, from its BLE advertisement
     ble        find, pair, wake the Wi-Fi and read the access point credentials
-    wifi       join the camera's access point and return to the previous network (Windows)
+    wifi       join the camera's access point and return to the previous network (one backend per system)
     datalink   DUML commands and the H.264 live view over UDP
     video      H.264 decoding (PyAV)
     registry   cameras linked to this PC
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

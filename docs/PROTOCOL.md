@@ -1,6 +1,6 @@
 # DJI Osmo over Wi-Fi: protocol notes
 
-How OsmoCam and Osmo Client for Windows talk to a DJI Osmo camera: Bluetooth LE to find, pair and wake
+How OsmoCam and Osmo Client talk to a DJI Osmo camera: Bluetooth LE to find, pair and wake
 it, then the camera's own Wi-Fi access point for commands, status, live video and file downloads.
 
 This is an unofficial, independent description written for interoperability. Everything here was
@@ -143,7 +143,7 @@ While connected over BLE the camera may push named status topics as `00/99` fram
 - SSID and password come from `07/07` / `07/0E` over BLE. The network is WPA2-PSK (AES).
 - The camera is `192.168.2.1`; the PC gets an address in `192.168.2.0/24`.
 - While the PC's Wi-Fi adapter is on the camera's network it has no internet through that adapter.
-  On Windows, keeping Ethernet (or a second adapter) connected keeps internet working.
+  Keeping Ethernet (or a second adapter) connected keeps internet working.
 - Every Osmo camera uses the same address, so files listed on one camera must not be requested from
   another.
 

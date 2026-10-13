@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""OsmoCam: use a DJI Osmo camera as a Windows webcam over Wi-Fi (unofficial).
+"""OsmoCam: use a DJI Osmo camera as a webcam over Wi-Fi (unofficial).
 
-    osmocam.bat                 # "OBS Virtual Camera" + a preview page at http://127.0.0.1:8090
-    osmocam.bat --no-vcam       # preview page only (OBS not needed)
-    osmocam.bat --scan          # list the DJI Osmo cameras nearby and exit
+    osmocam.bat / ./osmocam.sh             # the virtual camera + a preview page at http://127.0.0.1:8090
+    osmocam.bat / ./osmocam.sh --no-vcam   # preview page only (no virtual camera needed)
+    osmocam.bat / ./osmocam.sh --scan      # list the DJI Osmo cameras nearby and exit
 
 The camera's live view (H.264, 1280x720 at 30 fps) arrives over the camera's own Wi-Fi access point and
-is sent to the "OBS Virtual Camera" device, which Zoom, Teams, Meet and others can select. OBS Studio must
-be installed for that (it does not have to be running).
+is sent to a virtual camera, which Zoom, Teams, Meet and others can select: "OBS Virtual Camera" on
+Windows and macOS (OBS Studio must be installed), a v4l2loopback device on Linux.
 
-The first time, the camera asks to approve "OSMO" on its screen. While OsmoCam runs, the PC's Wi-Fi is
-joined to the camera, so internet has to come from another adapter (Ethernet, USB tethering or a second
-Wi-Fi adapter). Ctrl+C stops it and puts the Wi-Fi back on the previous network.
+The first time, the camera asks to approve "OSMO" on its screen. While OsmoCam runs, the computer's Wi-Fi
+is joined to the camera, so internet has to come from another adapter (Ethernet, USB tethering or a
+second Wi-Fi adapter). Ctrl+C stops it and puts the Wi-Fi back on the previous network.
 """
 
 from __future__ import annotations
@@ -26,11 +26,24 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import av
+import numpy as np
+from bleak.exc import BleakError
 
 from camlink import ble, datalink, models, wifi
 from camlink.registry import DEFAULT_TRANSPORT, CameraRegistry, other_transport
 from camlink.util import fine_timer, log
 from camlink.video import H264Decoder
+
+# The OBS Virtual Camera on Windows and macOS; on Linux, a v4l2loopback device (see the README).
+SYSTEM = "linux" if sys.platform.startswith("linux") else sys.platform
+VCAM_BACKEND = "v4l2loopback" if SYSTEM == "linux" else "obs"
+VCAM_HINTS = {
+    "win32": "install OBS Studio (it does not need to be open)",
+    "darwin": "install OBS Studio 30 or newer, click Start Virtual Camera in it once and allow its system "
+              "extension (System Settings > Privacy & Security), then start OsmoCam again",
+    "linux": "load v4l2loopback: sudo modprobe v4l2loopback devices=1 exclusive_caps=1 card_label=OsmoCam",
+}
+LIVE_VIEW_SIZE = (1280, 720)        # the camera's live view; other sizes are scaled (and letterboxed) to it
 
 
 class Latency:
@@ -77,19 +90,39 @@ class Outputs:
             self.seq += 1
             self.cond.notify_all()
 
-    def _to_vcam(self, frame: av.VideoFrame) -> None:
+    def open_vcam(self) -> None:
+        """Open the virtual camera before connecting to the camera. Opening it can take several seconds,
+        and fails when it is missing (macOS takes ~13 s to say so): done while video flows, that stalls the
+        live view. Without it, OsmoCam carries on with the preview page only."""
+        if not self.use_vcam:
+            return
         import pyvirtualcam
 
+        width, height = LIVE_VIEW_SIZE
+        log("Opening the virtual camera...")
+        try:
+            cam = pyvirtualcam.Camera(width, height, self.fps, fmt=pyvirtualcam.PixelFormat.I420, backend=VCAM_BACKEND)
+        except Exception as error:  # noqa: BLE001 - missing driver or extension: keep the preview page
+            self.use_vcam = False
+            log(f"Virtual camera unavailable: {error}")
+            log(f"Carrying on with the preview page only. To use the camera as a webcam, {VCAM_HINTS[SYSTEM]}.")
+            return
         with self._vcam_lock:
-            if self._closed:
+            self.cam = cam
+        log(f"Virtual camera ready: {cam.device} {width}x{height} @ {self.fps} fps")
+
+    def _to_vcam(self, frame: av.VideoFrame) -> None:
+        with self._vcam_lock:
+            if self._closed or self.cam is None:
                 return
-            if self.cam is None:
-                self.cam = pyvirtualcam.Camera(frame.width, frame.height, self.fps,
-                                               fmt=pyvirtualcam.PixelFormat.I420, backend="obs")
-                log(f"Virtual camera ready: {self.cam.device} {frame.width}x{frame.height} @ {self.fps} fps")
-            if (frame.width, frame.height) != (self.cam.width, self.cam.height) or frame.format.name != "yuv420p":
-                frame = frame.reformat(width=self.cam.width, height=self.cam.height, format="yuv420p")
-            self.cam.send(frame.to_ndarray())
+            try:
+                self.cam.send(fit_i420(frame, self.cam.width, self.cam.height))
+            except Exception as error:  # noqa: BLE001 - the device went away: keep the preview page going
+                log(f"Virtual camera stopped: {error}")
+                self.use_vcam = False
+                with contextlib.suppress(Exception):
+                    self.cam.close()
+                self.cam = None
 
     def close(self) -> None:
         with self._vcam_lock:
@@ -97,6 +130,24 @@ class Outputs:
             if self.cam is not None:
                 self.cam.close()
                 self.cam = None
+
+
+def fit_i420(frame: av.VideoFrame, width: int, height: int) -> np.ndarray:
+    """The frame as I420 at the virtual camera's size: scaled to fit and, when its shape differs (a 4:3
+    live view), centred between black bars instead of stretched."""
+    if (frame.width, frame.height) == (width, height):
+        return (frame if frame.format.name == "yuv420p" else frame.reformat(format="yuv420p")).to_ndarray()
+    scale = min(width / frame.width, height / frame.height)
+    w, h = max(2, int(frame.width * scale) & ~1), max(2, int(frame.height * scale) & ~1)
+    planes = frame.reformat(width=w, height=h, format="yuv420p").to_ndarray().ravel()
+    out = np.empty(width * height * 3 // 2, np.uint8)
+    y, u, v = out[:width * height], out[width * height:width * height * 5 // 4], out[width * height * 5 // 4:]
+    y[:], u[:], v[:] = 16, 128, 128                                   # black
+    x0, y0 = (width - w) // 4 * 2, (height - h) // 4 * 2              # even offsets, centred
+    y.reshape(height, width)[y0:y0 + h, x0:x0 + w] = planes[:w * h].reshape(h, w)
+    for target, source in ((u, planes[w * h:w * h * 5 // 4]), (v, planes[w * h * 5 // 4:])):
+        target.reshape(height // 2, width // 2)[y0 // 2:(y0 + h) // 2, x0 // 2:(x0 + w) // 2] = source.reshape(h // 2, w // 2)
+    return out.reshape(height * 3 // 2, width)
 
 
 def start_preview(outputs: Outputs, port: int) -> None:
@@ -156,7 +207,7 @@ async def scan(seconds: float) -> None:
     log(f"Listening for DJI Osmo cameras for {seconds:.0f} s...")
     found = await ble.scan(seconds)
     if not found:
-        log("No DJI Osmo camera found. Is it on and close to the PC?")
+        log("No DJI Osmo camera found. Is it on and close to the computer?")
     for cam in sorted(found.values(), key=lambda c: -c["rssi"]):
         notes = [cam["power"] or "", "tested" if cam["tested"] else "untested", cam["unsupported"] or ""]
         print(f"  {cam['address']}  {cam['name'] or '?':20} {cam['model']:18} {cam['rssi']} dBm  "
@@ -166,6 +217,7 @@ async def scan(seconds: float) -> None:
 async def run(args: argparse.Namespace) -> None:
     stop = threading.Event()
     outputs = Outputs(not args.no_vcam, args.fps)
+    await asyncio.to_thread(outputs.open_vcam)
     decoder = H264Decoder(outputs.on_frame, stop)
     decoder.start()
     if args.preview_port:
@@ -268,13 +320,14 @@ async def run(args: argparse.Namespace) -> None:
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--no-vcam", action="store_true", help="don't send the picture to the OBS Virtual Camera")
+    parser.add_argument("--no-vcam", action="store_true", help="don't send the picture to the virtual camera")
     parser.add_argument("--preview-port", type=int, default=8090, help="port of the preview page (0 = off)")
     parser.add_argument("--fps", type=int, default=30, help="frame rate announced to the virtual camera")
     parser.add_argument("--scan", action="store_true", help="list the DJI Osmo cameras nearby and exit")
-    parser.add_argument("--address", help="Bluetooth address of the camera (default: the one used last, "
-                                          "else the first DJI Osmo found)")
-    parser.add_argument("--interface", help="Wi-Fi adapter to use, as Windows names it (default: the first one)")
+    parser.add_argument("--address", help="Bluetooth address of the camera, as --scan lists it (default: the one "
+                                          "used last, else the first DJI Osmo found)")
+    parser.add_argument("--interface", help="Wi-Fi adapter to use: 'Wi-Fi 2' on Windows, en0 on macOS, wlan0 "
+                                            "on Linux (default: the first one)")
     parser.add_argument("--home", help="Wi-Fi network to return to (default: the current one)")
     parser.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = run until Ctrl+C)")
     parser.add_argument("--stall", type=float, default=3.0, help="restart the live view after N s without video")
@@ -287,6 +340,9 @@ def main() -> None:
             asyncio.run(scan(8) if args.scan else run(args))
     except KeyboardInterrupt:
         pass
+    except BleakError as error:
+        log(f"Bluetooth is not available: {error} ({ble.UNAVAILABLE_HINT})")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

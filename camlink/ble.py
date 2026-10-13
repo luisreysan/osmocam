@@ -33,6 +33,9 @@ ASK_PASSWORD = Message(ADDR_APP, ADDR_WIFI, 0x800E, FLAG_REQUEST, 0x07, 0x0E)
 PAIR_ALREADY = 0x01
 PAIR_NEEDS_APPROVAL = 0x02
 
+UNAVAILABLE_HINT = ("is Bluetooth on? On macOS, allow Bluetooth for the Terminal app (System Settings > Privacy & "
+                    "Security > Bluetooth); on Linux, BlueZ (bluetoothd) must be running")
+
 
 def _describe(device, adv) -> dict | None:
     name = adv.local_name or device.name or ""

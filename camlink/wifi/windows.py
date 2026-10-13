@@ -1,23 +1,20 @@
-"""Windows Wi-Fi: join the camera's access point, and go back to the network the PC was on.
+"""Windows backend of camlink.wifi.
 
 Joining adds a WPA2 profile for the camera's network and connects with netsh. Going back uses the Native
 Wifi API (wlanapi.dll) directly: netsh refuses to connect to a saved network unless Windows location
-access is enabled, WlanConnect does not. The adapter is the first Wi-Fi adapter unless one is named.
+access is enabled, WlanConnect does not.
 """
 
 from __future__ import annotations
 
 import ctypes
 import os
-import socket
 import subprocess
 import tempfile
-import time
 from ctypes import wintypes
 from xml.sax.saxutils import escape
 
-from .protocol import CAMERA_HOST, CAMERA_SUBNET
-from .util import log
+from ..util import log
 
 PROFILE_XML = """<?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
@@ -134,7 +131,7 @@ def _adapter(interface: str | None) -> tuple[_GUID, str] | None:
 
 
 def adapter_name(interface: str | None = None) -> str:
-    """Name of the Wi-Fi adapter in use ("" when the PC has none)."""
+    """Name of the Wi-Fi adapter in use ("" when the computer has none)."""
     found = _adapter(interface)
     return found[1] if found else ""
 
@@ -156,31 +153,8 @@ def _netsh(*args: str) -> subprocess.CompletedProcess:
                           errors="replace")
 
 
-def local_ip_towards(host: str) -> str:
-    """Local IPv4 address Windows would use to reach `host` ("" if there is no route)."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.connect((host, 9))
-        return sock.getsockname()[0]
-    except OSError:
-        return ""
-    finally:
-        sock.close()
-
-
-def on_camera_network() -> bool:
-    return local_ip_towards(CAMERA_HOST).startswith(CAMERA_SUBNET)
-
-
-def join(ssid: str, password: str, timeout: float = 45, interface: str | None = None) -> str:
-    """Connect the Wi-Fi adapter to the camera's access point; returns the PC's address on it."""
-    if on_camera_network():
-        ip = local_ip_towards(CAMERA_HOST)
-        log(f"Already on the camera network ({ip})")
-        return ip
-    name = adapter_name(interface)
-    if not name:
-        raise RuntimeError("No Wi-Fi adapter found" + (f" named {interface!r}" if interface else ""))
+def prepare(ssid: str, password: str, name: str) -> None:
+    """Save a WPA2 profile for the camera's network (connect manually: Windows never joins it by itself)."""
     fd, path = tempfile.mkstemp(suffix=".xml")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -190,20 +164,14 @@ def join(ssid: str, password: str, timeout: float = 45, interface: str | None = 
             raise RuntimeError(f"Could not add the camera's Wi-Fi profile: {result.stdout.strip()} {result.stderr.strip()}")
     finally:
         os.remove(path)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = _netsh("connect", f"name={ssid}", f"ssid={ssid}", f"interface={name}")
-        log(f"Joining {ssid} on {name}: {result.stdout.strip()[:100]}")
-        for _ in range(8):
-            time.sleep(1)
-            ip = local_ip_towards(CAMERA_HOST)
-            if ip.startswith(CAMERA_SUBNET):
-                log(f"Joined {ssid} ({ip})")
-                return ip
-    raise RuntimeError(f"Could not join {ssid} within {timeout:.0f} s")
 
 
-def restore(profile: str, interface: str | None = None) -> None:
+def connect(ssid: str, _password: str, name: str) -> str:
+    """One attempt to join the camera's network; returns what netsh said."""
+    return _netsh("connect", f"name={ssid}", f"ssid={ssid}", f"interface={name}").stdout.strip()
+
+
+def restore(profile: str, interface: str | None = None, _camera: str = "") -> None:
     """Reconnect the Wi-Fi adapter to the saved network it was on before (`profile`)."""
     if not profile:
         return

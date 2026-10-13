@@ -41,12 +41,12 @@ this repository.
 | package | license |
 |---|---|
 | [bleak](https://github.com/hbldh/bleak) | MIT |
-| [PyAV](https://github.com/PyAV-Org/PyAV) | BSD-3-Clause; its Windows wheels include FFmpeg libraries under their own (L)GPL licenses |
+| [PyAV](https://github.com/PyAV-Org/PyAV) | BSD-3-Clause; its wheels include FFmpeg libraries under their own (L)GPL licenses |
 | [NumPy](https://github.com/numpy/numpy) | BSD-3-Clause |
 | [Pillow](https://github.com/python-pillow/Pillow) | MIT-CMU |
 | [pyvirtualcam](https://github.com/letmaik/pyvirtualcam) | GPL-2.0 |
 
 OsmoCam's own code is MIT. It uses pyvirtualcam (GPL-2.0) as a separately installed library to reach
-the OBS Virtual Camera. If you build a single bundled executable that includes pyvirtualcam, that bundle
-as a whole must be distributed under the terms of the GPL-2.0. OBS Studio (GPL-2.0) is installed
-separately by the user.
+the OBS Virtual Camera (Windows, macOS) or a v4l2loopback device (Linux). If you build a single bundled
+executable that includes pyvirtualcam, that bundle as a whole must be distributed under the terms of the
+GPL-2.0. OBS Studio (GPL-2.0) and v4l2loopback (GPL-2.0) are installed separately by the user.

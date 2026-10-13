@@ -1,7 +1,7 @@
-"""Cameras linked to this PC: %LOCALAPPDATA%\\osmo-pc\\cameras.json, shared by both apps.
+"""Cameras linked to this computer: cameras.json in util.data_dir(), shared by both apps.
 
 Each entry keeps the camera's BLE address, name and model, the Wi-Fi credentials it handed over when it
-was paired, and the datalink transport that worked. The file stays on this PC; it is never uploaded.
+was paired, and the datalink transport that worked. The file stays on this computer; it is never uploaded.
 """
 
 from __future__ import annotations
