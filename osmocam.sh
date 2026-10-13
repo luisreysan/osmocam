@@ -11,6 +11,9 @@ venv="$data/venv-cam"
 python="$venv/bin/python"
 requirements="$here/requirements.txt"
 stamp="$venv/requirements.sha256"
+# Python versions with ready-made builds of every library used here, newest first. Python 3.15 (October
+# 2026) still lacks some of them (pip then tries to compile them and fails), so it is not used.
+versions="3.14 3.13 3.12 3.11 3.10"
 
 # An install that never finished: start over (and choose the Python again).
 if [ -d "$venv" ] && [ ! -f "$stamp" ]; then
@@ -18,18 +21,19 @@ if [ -d "$venv" ] && [ ! -f "$stamp" ]; then
 fi
 if [ ! -x "$python" ]; then
     echo "First run: creating the Python environment..."
-    # Newest first, but Python 3.15 (October 2026) still lacks builds of some of the libraries: it is
-    # only used when nothing from 3.10 to 3.14 is installed.
     base=""
-    for candidate in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
-        if command -v "$candidate" >/dev/null 2>&1 &&
-            "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
-            base="$candidate"
-            break
-        fi
+    for candidate in $(for v in $versions; do printf 'python%s ' "$v"; done) python3; do
+        version=$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || continue
+        case " $versions " in
+            *" $version "*) base="$candidate"; break ;;
+        esac
     done
     if [ -z "$base" ]; then
-        echo "Python 3.10 or newer is required (3.14 recommended): https://www.python.org/downloads/"
+        echo
+        echo "Python 3.10 to 3.14 is needed (3.14 recommended). Python 3.15 is too new for now: some of the"
+        echo "libraries this app uses have no build for it yet. Install Python 3.14 (it can stay next to other"
+        echo "versions) from https://www.python.org/downloads/ (on macOS, the \"macOS 64-bit universal2"
+        echo "installer\"; with Homebrew: brew install python@3.14), then run this again."
         exit 1
     fi
     mkdir -p "$data"
@@ -42,15 +46,11 @@ fi
 sum=$( (sha256sum "$requirements" 2>/dev/null || shasum -a 256 "$requirements") | cut -d ' ' -f 1)
 if [ ! -f "$stamp" ] || [ "$(cat "$stamp")" != "$sum" ]; then
     echo "Installing the requirements..."
-    if ! "$python" -m pip install --disable-pip-version-check -q -r "$requirements"; then
-        version=$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-        too_new=$("$python" -c 'import sys; print(int(sys.version_info[:2] > (3, 14)))')
+    if ! "$python" -m pip install --disable-pip-version-check -q --only-binary=:all: -r "$requirements"; then
+        version=$("$python" -c 'import sys, platform; print("%d.%d, %s" % (sys.version_info[0], sys.version_info[1], platform.machine()))')
         rm -rf "$venv"
-        echo "Installing the requirements failed (Python $version). Check the internet connection."
-        if [ "$too_new" = 1 ]; then
-            echo "Python $version is too new for some of the libraries: install Python 3.14 from"
-            echo "https://www.python.org/downloads/ and run this again."
-        fi
+        echo "Installing the requirements failed (Python $version). Check the internet connection and the"
+        echo "message above, then run this again."
         exit 1
     fi
     echo "$sum" > "$stamp"
