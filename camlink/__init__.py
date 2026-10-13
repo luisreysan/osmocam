@@ -9,7 +9,7 @@ Unofficial and independent; not affiliated with DJI. The protocol is described i
     wifi       join the camera's access point and return to the previous network (one backend per system)
     datalink   DUML commands and the H.264 live view over UDP
     video      H.264 decoding (PyAV)
-    registry   cameras linked to this PC
+    registry   cameras linked to this computer
 """
 
 __version__ = "1.1.0"

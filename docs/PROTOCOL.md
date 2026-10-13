@@ -30,7 +30,7 @@ integers are little-endian unless noted.
 ## 1. Overview
 
 ```
-PC                                         camera
+computer                                   camera
  │  BLE: connect, pair ("OSMO" approve)  ──▶  │
  │  BLE: wake, ask Wi-Fi SSID + password ──▶  │   (BLE stays up: keepalive every 1 s)
  │  Wi-Fi: join the camera's access point     │   192.168.2.1, WPA2-PSK
@@ -141,8 +141,8 @@ While connected over BLE the camera may push named status topics as `00/99` fram
 ## 4. The camera's Wi-Fi access point
 
 - SSID and password come from `07/07` / `07/0E` over BLE. The network is WPA2-PSK (AES).
-- The camera is `192.168.2.1`; the PC gets an address in `192.168.2.0/24`.
-- While the PC's Wi-Fi adapter is on the camera's network it has no internet through that adapter.
+- The camera is `192.168.2.1`; the computer gets an address in `192.168.2.0/24`.
+- While the computer's Wi-Fi adapter is on the camera's network it has no internet through that adapter.
   Keeping Ethernet (or a second adapter) connected keeps internet working.
 - Every Osmo camera uses the same address, so files listed on one camera must not be requested from
   another.

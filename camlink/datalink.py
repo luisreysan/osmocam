@@ -1,7 +1,8 @@
 """The Wi-Fi datalink: DUML commands, status pushes and the H.264 live view, over one UDP socket.
 
-Once the PC is on the camera's access point, one pairing frame sent to TCP 7001 wakes the link; then
-everything runs over UDP (port 9004 on the Osmo cameras). Every UDP packet starts with an 8-byte header:
+Once the computer is on the camera's access point, one pairing frame sent to TCP 7001 wakes the link;
+then everything runs over UDP (port 9004 on the Osmo cameras). Every UDP packet starts with an 8-byte
+header:
 
     u16 LE  0x8000 | packet length (header included, 14 bits)
     u16 LE  session id (random, chosen by the client)
