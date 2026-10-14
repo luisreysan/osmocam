@@ -12,4 +12,4 @@ Unofficial and independent; not affiliated with DJI. The protocol is described i
     registry   cameras linked to this computer
 """
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"

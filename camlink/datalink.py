@@ -29,9 +29,9 @@ from enum import IntEnum
 from functools import reduce
 
 from .duml import FLAG_REPLY, FLAG_REQUEST, Message, parse_all
-from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_ENCODER_1, ADDR_ENCODER_2, ADDR_LIVEVIEW, APP_INFO_REPLY,
-                       CAMERA_HOST, DATALINK_PORT, ENCODER_REGISTER, POKE_PORT, REGISTER_PAYLOAD,
-                       pairing_message, topic_subscription)
+from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_ENCODER_1, ADDR_ENCODER_2, ADDR_LIVEVIEW, ADDR_TOPICS,
+                       APP_INFO_REPLY, CAMERA_HOST, DATALINK_PORT, ENCODER_REGISTER, POKE_PORT,
+                       REGISTER_PAYLOAD, pairing_message, topic_subscription)
 from .util import log
 
 _HEADER = struct.Struct("<HHHBB")
@@ -142,9 +142,11 @@ class Datalink:
 
     def __init__(self, port: int = DATALINK_PORT, host: str = CAMERA_HOST,
                  on_video: Callable[[bytes, float], None] | None = None,
-                 on_message: Callable[[Message], None] | None = None, liveview: str = "nano") -> None:
+                 on_message: Callable[[Message], None] | None = None, liveview: str = "nano",
+                 topics: tuple[str, ...] = ()) -> None:
         self.host, self.port = host, port
         self.liveview = liveview              # "nano" or "action": see camlink.models.liveview_mode
+        self.topics = topics                  # named status topics to subscribe to (pushed as 0x00/0x99)
         self.on_video = on_video
         self.on_message = on_message
         # The camera sends requests of its own ("who are you" about once a second, status topics...). They
@@ -223,7 +225,8 @@ class Datalink:
 
     def _start_live_view(self) -> None:
         self.send(0x00, 0x81, REGISTER_PAYLOAD)                      # register as an app
-        self.send(0x00, 0x99, topic_subscription("cam_status", 0x69DF))
+        for i, name in enumerate(self.topics):
+            self.send(0x00, 0x99, topic_subscription(name, 0x6A00 + i), ADDR_TOPICS)
         self.send(0x02, 0x09, bytes(10) + b"\x03")                   # live view source: camera
         self.send(0x09, 0xA8, bytes((0, 4, 2, 0, 0, 0, 0, 0, 0, 0)))  # start transmitting
         if self.liveview == "action":

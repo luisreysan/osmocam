@@ -13,6 +13,7 @@ ADDR_WIFI = 0x07         # Wi-Fi module: pairing and access point credentials (B
 ADDR_LIVEVIEW = 0x41     # live view transmitter (Wi-Fi datalink)
 ADDR_ENCODER_1 = 0x28    # video encoder, Action series: app registration (Wi-Fi datalink)
 ADDR_ENCODER_2 = 0x48    # video encoder, Action series: live view trigger and heartbeat (Wi-Fi datalink)
+ADDR_TOPICS = 0x28       # named status topics: takes the subscriptions (0x00/0x99) and sends the pushes
 ADDR_SESSION = 0xF0      # BLE session wake / keepalive
 ADDR_WAKE = 0x1C         # wakes the camera after pairing (BLE)
 
@@ -55,6 +56,8 @@ ENCODER_REGISTER = bytes.fromhex("170046237c415050000000000002")
 
 
 def topic_subscription(name: str, subscription_id: int) -> bytes:
-    """Payload of a 0x00/0x99 subscription to a named status topic."""
+    """Payload of a 0x00/0x99 subscription to a named status topic, sent to ADDR_TOPICS. The camera answers
+    00 (subscribed) or 01 (no such topic on this model), keeps the subscription until it restarts, and
+    doesn't duplicate the pushes when the same topic is subscribed again."""
     raw = name.encode("utf-8")
     return struct.pack("<4sI3xHH", b"\x02\x02\x00\x00", subscription_id, len(raw) + 6, len(raw)) + raw + bytes(4)

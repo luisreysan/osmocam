@@ -232,7 +232,7 @@ Right after the handshake, send:
 | command | payload | purpose |
 |---|---|---|
 | `00/81` | `00 'A' 'P' 'P' 00×38 02 00×8 02 08 00×11` (64 bytes) | register as an app |
-| `00/99` | topic subscription to `cam_status` (below) | status |
+| `00/99` → receiver `0x28` | topic subscriptions (below; Osmo Client only) | status, capabilities |
 | `02/09` | `00×10 03` | live view source: camera |
 | `09/A8` → receiver `0x41` | `00 04 02 00 00 00 00 00 00 00` | start transmitting video |
 
@@ -242,8 +242,10 @@ Topic subscription payload:
 02 02 00 00 <subscription id u32> 00 00 00 <name length + 6 u16> <name length u16> <name> 00 00 00 00
 ```
 
-(the apps use subscription id `0x69DF`.) Subscriptions to other topic names are refused (`E0`) on the
-Nano.
+Send it to receiver `0x28`, which answers `00` (subscribed) or `01` (no such topic on this model); sent
+to `0x01` it is refused (`E0`). Osmo Client subscribes to `cam_expo_param` and to the capability tables
+(section 8.4), with ids from `0x6A00`. The camera keeps subscriptions until it restarts and pushes them to
+whichever app is connected; subscribing to the same topic again doesn't duplicate the pushes.
 
 **Action series** (as described by [dji-vcam](https://github.com/RB14/dji-vcam) for the Osmo Action 5
 Pro; not verified with these apps yet). The video encoder (`0x28` / `0x48`) streams only while the app
@@ -341,12 +343,15 @@ Each capture mode keeps its own exposure and format: after `02/E1`, read them ag
 | set shutter | `02/28` | `01 <u16> <decimal> 00 00 00` | Manual only |
 
 ISO codes (one stop each): `03`=100, `04`=200, `05`=400, `06`=800, `07`=1600, `08`=3200, `09`=6400,
-`0A`=12800, `0B`=25600, `0C`=51200. (`01`/`02` behave like `03`, `0D` like `0C`.)
+`0A`=12800, `0B`=25600, `0C`=51200. (`01`/`02` behave like `03`, `0D` like `0C`.) What a capture mode
+offers is in `camcap_iso` (8.4); on the Nano: 100-12800 in Video, up to 25600 in the other modes, Auto
+only in Super Night. The camera also accepts codes outside that list, but they are not offered.
 
 Shutter speed: a u16 where bit 15 set means 1/x seconds (x = bits 0-14) and clear means whole seconds,
 plus a decimal digit. Examples: `0x8019` + 0 = 1/25 s, `0x800C` + 5 = 1/12.5 s, `0x0001` + 3 = 1.3 s.
-In the code the two are combined as `u16 | decimal << 16`; the list of accepted values, from 1/8000 s to
-30 s, is `SHUTTER_SPEEDS` in `camlink/camera.py`.
+In the code the two are combined as `u16 | decimal << 16`. The speeds a capture mode offers are in
+`camcap_shutter` (8.4): on the Nano 1/8000 s to 30 s in Photo and Timelapse, and down to 1/fps in the video
+modes. `SHUTTER_SPEEDS` in `camlink/camera.py` is the fallback list.
 
 ### 7.2 Video format
 
@@ -366,11 +371,11 @@ Changing the format restarts the camera's encoder: the live view stops for 2-5 s
 |---|---|---|---|---|---|---|---|---|
 | fps | 24 | 25 | 30 | 48 | 50 | 60 | 120 | 240 |
 
-What each capture mode accepts (anything else answers `E3`):
+What each capture mode offers on the Nano (the camera publishes it as `camcap_video_format`, 8.4):
 
 | mode | resolutions | fps |
 |---|---|---|
-| Video | all six | 24-60 (1080p 4:3: up to 30) |
+| Video | all six | 24-60 (4K 4:3: up to 50) |
 | Super Night | 16:9 ones | 24, 25, 30 |
 | Timelapse, Hyperlapse | 16:9 ones | 25, 30 |
 | Slow-mo | 4K, 2.7K, 1080p at 120 fps (factor 4); 1080p at 240 fps (factor 8) | |
@@ -404,7 +409,7 @@ After registration the camera pushes, without being asked:
 |---|---|---|---|
 | `02/80` | `0x01` | ~10/s | camera status (8.1) |
 | `0D/02` | `0x05` | ~1/s | battery (8.2) |
-| `00/99` | `0x28` | varies | named status topics (8.3), not always |
+| `00/99` | `0x28` | varies | named status topics the app subscribed to (8.3) |
 
 ### 8.1 Camera status `02/80`
 
@@ -459,8 +464,10 @@ The camera reserves a fixed amount of storage per second of video and per photo,
 
 ### 8.3 Named status topics `00/99`
 
-Sometimes the camera publishes named topics (`cam_expo_param`, `cam_storage`, `cam_video_param_v2`, ...)
-over BLE and over the datalink. They are optional: some sessions get none. Layout:
+The camera publishes the named topics an app subscribed to (section 5.6: `cam_expo_param`, `cam_storage`,
+`cam_video_param_v2`, ...) over the datalink, and over BLE while only BLE is connected. Subscriptions
+last until the camera restarts, so a session can also get topics it didn't ask for (after the phone app,
+for example). Layout:
 
 ```
 02 06 00 00 <seq u16> 00 00 00 00 00 <rest length u16> <name length u16> <name> 00×6 <data length u16> <data>
@@ -471,6 +478,36 @@ Those that arrive as requests (flags `0x40`) must be answered (section 5.7).
 `cam_expo_param` gives the exposure actually in use, also in Auto: ISO = u32 at data offset 16
 (any value, e.g. 2509 in Auto), shutter = u16 at data offset 20 (same encoding as section 7.1, without
 the decimal digit).
+
+### 8.4 Capability tables (`camcap_*`)
+
+The topics named `camcap_*` describe what the **current** capture mode offers. The camera sends each one
+when it is subscribed and again when it changes (after a capture mode switch, for example), as requests
+to answer. Data:
+
+```
+<supported u8> <table length u16> <table>          supported 0 = not available
+```
+
+Most tables are a count followed by that many entries:
+
+| topic | table | Osmo Nano |
+|---|---|---|
+| `camcap_base` | count, capture modes (`02/E1` codes), then other fields | `05 01 00 0A 02 34 28` |
+| `camcap_video_format` | count, then per entry: resolution, fps code, `00` | Video: 35 entries |
+| `camcap_iso` | `00`, count, ISO codes (`00` = Auto) | Video: Auto, 100-12800 |
+| `camcap_shutter` | `00`, n, n bytes, group count; per group: key, slowest speed (u16 + decimal), count, speeds (u16 + decimal each) | Video at 25 fps: 1/8000-1/25 s |
+| `camcap_photo_size` | count, then per entry: size, ratio, `00`, `00` (section 7.3) | Photo: M and L, 4:3 and 16:9 |
+| `camcap_wb` | minimum K / 100, `00`, maximum K / 100, `00`, 4 bytes, count, white balance modes | 2000-10000 K; `00`, `06` |
+| `camcap_exposure_mode` | `00`, count, exposure modes (`02/1E`) | `01`, `04` |
+
+Osmo Client uses the first six and falls back to the Nano's tables (section 7) until they arrive. Others
+the Nano publishes (count and values unless noted): `camcap_capture_aspect_type`, `camcap_color_mode`,
+`camcap_eis`, `camcap_fov`, `camcap_iso_auto_max`, `camcap_sharpness` and `camcap_denoise` (signed),
+`camcap_hyperlapse_ratio` (`00` = auto, then 2, 5, 10, 15, 30), `camcap_timelapse_duration` (u32 s),
+`camcap_countdown` (u32 ms), `camcap_loop_video_duration` (u16 s), `camcap_slowmotion_ratio` (pairs of
+base fps code and factor). Its mode `34` is not handled by the apps yet; it lists two more resolution
+codes, `42` and `43`.
 
 ## 9. Media library and downloads
 
