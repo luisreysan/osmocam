@@ -14,6 +14,10 @@ import time
 from ..protocol import CAMERA_HOST, CAMERA_SUBNET
 from ..util import log
 
+class WifiError(RuntimeError):
+    """Joining the camera's network failed; the message says why and what to do."""
+
+
 if sys.platform == "win32":
     from . import windows as _system
 elif sys.platform == "darwin":
@@ -62,21 +66,26 @@ def join(ssid: str, password: str, timeout: float = 45, interface: str | None = 
         ip = local_ip_towards(CAMERA_HOST)
         log(f"Already on the camera network ({ip})")
         return ip
-    name = adapter_name(interface)
-    if not name:
-        raise RuntimeError("No Wi-Fi adapter found" + (f" named {interface!r}" if interface else ""))
-    _system.prepare(ssid, password, name)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = _system.connect(ssid, password, name)
-        log(f"Joining {ssid} on {name}: {result[:100]}")
-        for _ in range(8):
-            time.sleep(1)
-            ip = local_ip_towards(CAMERA_HOST)
-            if ip.startswith(CAMERA_SUBNET):
-                log(f"Joined {ssid} ({ip})")
-                return ip
-    raise RuntimeError(f"Could not join {ssid} within {timeout:.0f} s")
+    try:
+        name = adapter_name(interface)
+        if not name:
+            raise WifiError("No Wi-Fi adapter found" + (f" named {interface!r}" if interface else ""))
+        _system.prepare(ssid, password, name)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = _system.connect(ssid, password, name)
+            log(f"Joining {ssid} on {name}: {result[:100]}")
+            for _ in range(8):
+                time.sleep(1)
+                ip = local_ip_towards(CAMERA_HOST)
+                if ip.startswith(CAMERA_SUBNET):
+                    log(f"Joined {ssid} ({ip})")
+                    return ip
+    except WifiError:
+        raise
+    except RuntimeError as error:                 # the backends' own messages (Wi-Fi off, no nmcli...)
+        raise WifiError(str(error)) from error
+    raise WifiError(f"Could not join {ssid} within {timeout:.0f} s: is the camera on and close to the computer?")
 
 
 def restore(profile: str, interface: str | None = None) -> None:

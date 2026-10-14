@@ -343,6 +343,9 @@ def main() -> None:
     except BleakError as error:
         log(f"Bluetooth is not available: {error} ({ble.UNAVAILABLE_HINT})")
         sys.exit(1)
+    except wifi.WifiError as error:
+        log(f"Could not connect over Wi-Fi: {error}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """Windows backend of camlink.wifi.
 
-Joining adds a WPA2 profile for the camera's network and connects with netsh. Going back uses the Native
-Wifi API (wlanapi.dll) directly: netsh refuses to connect to a saved network unless Windows location
-access is enabled, WlanConnect does not.
+Joining turns Wi-Fi on if it is off (Native Wifi API), adds a WPA2 profile for the camera's network and
+connects with netsh. Going back uses the Native Wifi API (wlanapi.dll) directly: netsh refuses to connect
+to a saved network unless Windows location access is enabled, WlanConnect does not.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import ctypes
 import os
 import subprocess
 import tempfile
+import time
 from ctypes import wintypes
 from xml.sax.saxutils import escape
 
@@ -48,10 +49,26 @@ class _ConnectionParameters(ctypes.Structure):
                 ("bssids", ctypes.c_void_p), ("bss_type", ctypes.c_uint), ("flags", wintypes.DWORD)]
 
 
+class _PhyRadioState(ctypes.Structure):
+    _fields_ = [("phy_index", wintypes.DWORD), ("software", ctypes.c_uint), ("hardware", ctypes.c_uint)]
+
+
+class _RadioState(ctypes.Structure):
+    _fields_ = [("count", wintypes.DWORD), ("phys", _PhyRadioState * 64)]
+
+
 _CONNECTION_MODE_PROFILE = 0
 _BSS_INFRASTRUCTURE = 1
+_OPCODE_RADIO_STATE = 4
 _OPCODE_CURRENT_CONNECTION = 7
 _STATE_CONNECTED = 1
+_RADIO_ON = 1
+_RADIO_OFF = 2
+# netsh's code for "the wireless LAN interface is powered down" (Wi-Fi off, or airplane mode)
+POWERED_DOWN = "0x80342002"
+RADIO_OFF = ("Wi-Fi is turned off on this computer: turn it on (the Wi-Fi button in the quick settings, with "
+             "airplane mode off) and try again")
+RADIO_SWITCH = "Wi-Fi is switched off with a hardware switch or key on this computer: switch it on and try again"
 
 
 class _Wlan:
@@ -99,6 +116,24 @@ class _Wlan:
     def connect(self, guid: _GUID, profile: str) -> int:
         params = _ConnectionParameters(_CONNECTION_MODE_PROFILE, profile, None, None, _BSS_INFRASTRUCTURE, 0)
         return self.api.WlanConnect(self.handle, ctypes.byref(guid), ctypes.byref(params), None)
+
+    def radio(self, guid: _GUID) -> list[tuple[int, int, int]]:
+        """(phy index, software state, hardware state) of each radio of the adapter ([] if unknown)."""
+        size = wintypes.DWORD()
+        pointer = ctypes.c_void_p()
+        if self.api.WlanQueryInterface(self.handle, ctypes.byref(guid), _OPCODE_RADIO_STATE, None,
+                                       ctypes.byref(size), ctypes.byref(pointer), None):
+            return []
+        try:
+            state = ctypes.cast(pointer, ctypes.POINTER(_RadioState)).contents
+            return [(p.phy_index, p.software, p.hardware) for p in state.phys[:min(state.count, 64)]]
+        finally:
+            self.api.WlanFreeMemory(pointer)
+
+    def radio_on(self, guid: _GUID, phy_index: int) -> int:
+        state = _PhyRadioState(phy_index, _RADIO_ON, _RADIO_ON)
+        return self.api.WlanSetInterface(self.handle, ctypes.byref(guid), _OPCODE_RADIO_STATE,
+                                         ctypes.sizeof(state), ctypes.byref(state), None)
 
 
 def _copy_guid(guid: _GUID) -> _GUID:
@@ -153,8 +188,39 @@ def _netsh(*args: str) -> subprocess.CompletedProcess:
                           errors="replace")
 
 
+def _turn_radio_on(name: str) -> None:
+    """Turn the adapter's Wi-Fi radio on when it is switched off in Windows (the Wi-Fi button, airplane
+    mode); a hardware switch can't be overridden."""
+    found = _adapter(name)
+    if not found:
+        return
+    with _Wlan() as wlan:
+        phys = wlan.radio(found[0])
+        if not phys or any(software == _RADIO_ON and hardware == _RADIO_ON for _, software, hardware in phys):
+            return
+        if all(hardware == _RADIO_OFF for _, _, hardware in phys):
+            raise RuntimeError(RADIO_SWITCH)
+        log("Wi-Fi is turned off: turning it on")
+        for index, software, _ in phys:
+            if software == _RADIO_OFF:
+                code = wlan.radio_on(found[0], index)
+                if code:
+                    raise RuntimeError(f"{RADIO_OFF} (could not turn it on: error {code})")
+        for _ in range(20):
+            time.sleep(0.5)
+            if any(software == _RADIO_ON and hardware == _RADIO_ON for _, software, hardware in wlan.radio(found[0])):
+                time.sleep(2)                  # give the adapter a moment to see the networks around
+                return
+    raise RuntimeError(RADIO_OFF)
+
+
 def prepare(ssid: str, password: str, name: str) -> None:
-    """Save a WPA2 profile for the camera's network (connect manually: Windows never joins it by itself)."""
+    """Make sure Wi-Fi is on, and save a WPA2 profile for the camera's network (connect manually: Windows
+    never joins it by itself)."""
+    try:
+        _turn_radio_on(name)
+    except OSError as error:
+        log(f"Could not read the Wi-Fi radio state ({error}), trying anyway")
     fd, path = tempfile.mkstemp(suffix=".xml")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -168,7 +234,10 @@ def prepare(ssid: str, password: str, name: str) -> None:
 
 def connect(ssid: str, _password: str, name: str) -> str:
     """One attempt to join the camera's network; returns what netsh said."""
-    return _netsh("connect", f"name={ssid}", f"ssid={ssid}", f"interface={name}").stdout.strip()
+    said = _netsh("connect", f"name={ssid}", f"ssid={ssid}", f"interface={name}").stdout.strip()
+    if POWERED_DOWN in said:
+        raise RuntimeError(RADIO_OFF)
+    return said
 
 
 def restore(profile: str, interface: str | None = None, _camera: str = "") -> None:
