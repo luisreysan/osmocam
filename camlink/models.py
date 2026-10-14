@@ -16,6 +16,7 @@ MODELS = {
     0x0021: "Osmo Pocket 4", 0x0022: "Osmo Pocket 4 Pro",
 }
 TESTED_MODELS = {0x0019}
+NANO = 0x0019
 UNSUPPORTED_MODELS = {0x0017: "Osmo 360 (WPA3 Wi-Fi and 360° video: not supported)"}
 # Newer adverts carry a product type that refines the model id.
 PRODUCT_TYPES = {218: 0x0022}
@@ -61,3 +62,9 @@ def decode_advert(name: str, manufacturer_data: dict[int, bytes]) -> dict | None
         return None                       # another DJI product (drone, remote controller...)
     return {"model_id": model, "model": model_name(model), "tested": model in TESTED_MODELS,
             "unsupported": UNSUPPORTED_MODELS.get(model), "power": power}
+
+
+def liveview_mode(model_id: int | None) -> str:
+    """How the datalink starts the live view: "nano" (verified on the Osmo Nano), or "action" for every
+    other model: the Nano's commands plus the Action series' (see camlink.datalink)."""
+    return "nano" if model_id == NANO else "action"

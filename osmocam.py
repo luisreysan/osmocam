@@ -262,7 +262,8 @@ async def run(args: argparse.Namespace) -> None:
             transport = camera.get("transport") or dict(DEFAULT_TRANSPORT)
             if transport.get("poke", True):
                 await asyncio.to_thread(datalink.poke)
-            session = datalink.Datalink(port=transport.get("port", datalink.DATALINK_PORT), on_video=decoder.feed)
+            session = datalink.Datalink(port=transport.get("port", datalink.DATALINK_PORT), on_video=decoder.feed,
+                                        liveview=models.liveview_mode(camera.get("model_id")))
             decoder.reset()
             task = asyncio.ensure_future(asyncio.to_thread(session.run))
             started = time.monotonic()
@@ -273,8 +274,8 @@ async def run(args: argparse.Namespace) -> None:
                 stalled = now - (session.last_video or started)
                 if time_up():
                     session.stop()
-                elif stalled > args.stall:
-                    log(f"No video for {stalled:.1f} s, restarting the live view")
+                elif stalled > args.stall and not session.stopped.is_set():
+                    log(f"No video for {stalled:.1f} s, restarting the live view ({session.summary()})")
                     session.stop()
                 if now - report[0] >= args.report:
                     frames, video_bytes = decoder.frames, session.stats["video_bytes"]

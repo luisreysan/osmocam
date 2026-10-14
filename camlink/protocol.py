@@ -11,6 +11,8 @@ ADDR_APP = 0x02          # us: the client app
 ADDR_CAMERA = 0x01       # camera control and status
 ADDR_WIFI = 0x07         # Wi-Fi module: pairing and access point credentials (BLE)
 ADDR_LIVEVIEW = 0x41     # live view transmitter (Wi-Fi datalink)
+ADDR_ENCODER_1 = 0x28    # video encoder, Action series: app registration (Wi-Fi datalink)
+ADDR_ENCODER_2 = 0x48    # video encoder, Action series: live view trigger and heartbeat (Wi-Fi datalink)
 ADDR_SESSION = 0xF0      # BLE session wake / keepalive
 ADDR_WAKE = 0x1C         # wakes the camera after pairing (BLE)
 
@@ -47,6 +49,9 @@ def _app_record(gap: int, tail: int) -> bytes:
 # the answer whenever the camera asks the same question (it does, about once a second).
 REGISTER_PAYLOAD = _app_record(38, 11)      # 64 bytes
 APP_INFO_REPLY = _app_record(37, 10)        # 62 bytes
+# Registration with the Action series' video encoder (0x00/0x88 to ADDR_ENCODER_1), as described by the
+# MIT-licensed dji-vcam project (https://github.com/RB14/dji-vcam) for the Osmo Action 5 Pro.
+ENCODER_REGISTER = bytes.fromhex("170046237c415050000000000002")
 
 
 def topic_subscription(name: str, subscription_id: int) -> bytes:

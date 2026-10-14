@@ -174,7 +174,7 @@ Packet types:
 | type | direction | content |
 |---|---|---|
 | 0 | both | handshake |
-| 1 | camera → client | link packet; u16 at offset 18 = data cursor, u16 at offset 26 = extra cursor |
+| 1 | camera → client | link packet; u16 at offset 10 = video cursor, 18 = data cursor, 26 = extra cursor |
 | 2 | camera → client | video |
 | 3 | camera → client | link packet; its header sequence is the data cursor |
 | 4 | client → camera | acknowledgement |
@@ -206,7 +206,10 @@ These are the values the camera accepts; the meaning of each field is not docume
   with acknowledgements: if they do, commands sent after the first acknowledgement are ignored.
 - Every 25 ms send a type-4 acknowledgement (26-byte body): three groups of
   `<cursor u16> <cursor u16> 00 00 00 00` for the video, data and extra cursors, then `00 00`.
-  - video cursor = header sequence of the last video packet,
+  - video cursor = header sequence of the last video packet; before any video arrives (and while it is
+    stalled), the video cursor the camera reports at offset 10 of its type-1 packets. On the Nano that
+    cursor is the session's base sequence before the first video packet; some cameras don't start
+    their video until the acknowledgement carries it.
   - data / extra cursors = taken from type-1 packets (offsets 18 and 26) and type-3 packets (header
     sequence). Both start at the base sequence.
 
@@ -241,6 +244,19 @@ Topic subscription payload:
 
 (the apps use subscription id `0x69DF`.) Subscriptions to other topic names are refused (`E0`) on the
 Nano.
+
+**Action series** (as described by [dji-vcam](https://github.com/RB14/dji-vcam) for the Osmo Action 5
+Pro; not verified with these apps yet). The video encoder (`0x28` / `0x48`) streams only while the app
+keeps it alive. The apps send this to every model except the Nano, after the commands above:
+
+| command | receiver | flags | payload | when |
+|---|---|---|---|---|
+| `00/81` | `0x48` | `0x80` | the 62-byte app record (5.7) | at start, then every 2 s |
+| `00/88` | `0x28` | `0x40` | `17 00 46 23 7c 41 50 50 00 00 00 00 00 02` | at start, then every 1 s |
+| `00/82` | `0x48` | `0x80` | `00` | at start, then every 2 s |
+| `00/4F` | `0x48` | `0x40` | `01 00 <counter u8> 00 00 FF FF FF FF` (counter +1 every 400 ms) | every 200 ms |
+
+On the Action 5 Pro, `09/A8` answers `EE` from `0x41`.
 
 ### 5.7 Answering the camera's requests
 

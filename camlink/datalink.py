@@ -23,13 +23,15 @@ import socket
 import struct
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from enum import IntEnum
 from functools import reduce
 
 from .duml import FLAG_REPLY, FLAG_REQUEST, Message, parse_all
-from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_LIVEVIEW, APP_INFO_REPLY, CAMERA_HOST, DATALINK_PORT,
-                       POKE_PORT, REGISTER_PAYLOAD, pairing_message, topic_subscription)
+from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_ENCODER_1, ADDR_ENCODER_2, ADDR_LIVEVIEW, APP_INFO_REPLY,
+                       CAMERA_HOST, DATALINK_PORT, ENCODER_REGISTER, POKE_PORT, REGISTER_PAYLOAD,
+                       pairing_message, topic_subscription)
 from .util import log
 
 _HEADER = struct.Struct("<HHHBB")
@@ -43,6 +45,10 @@ ACK_INTERVAL = 0.025
 FRAME_IDLE = 0.005
 SPS_4 = b"\x00\x00\x00\x01\x67"
 SPS_3 = b"\x00\x00\x01\x67"
+# Action series: its video encoder streams only while it gets a heartbeat every 200 ms, with the app's
+# registration again every second and the live view trigger every two seconds.
+HEARTBEAT_INTERVAL = 0.2
+FLAG_WRITE = 0x80               # what the encoder's registration and trigger are sent with
 
 # Handshake: the client's base sequence, then one parameter block per channel (the values the camera
 # accepts; the meaning of each field is not documented), then a fixed tail.
@@ -136,8 +142,9 @@ class Datalink:
 
     def __init__(self, port: int = DATALINK_PORT, host: str = CAMERA_HOST,
                  on_video: Callable[[bytes, float], None] | None = None,
-                 on_message: Callable[[Message], None] | None = None) -> None:
+                 on_message: Callable[[Message], None] | None = None, liveview: str = "nano") -> None:
         self.host, self.port = host, port
+        self.liveview = liveview              # "nano" or "action": see camlink.models.liveview_mode
         self.on_video = on_video
         self.on_message = on_message
         # The camera sends requests of its own ("who are you" about once a second, status topics...). They
@@ -147,6 +154,8 @@ class Datalink:
         self.stopped = threading.Event()
         self.last_video = 0.0                 # monotonic() of the last video packet
         self.stats = {"packets": 0, "video_packets": 0, "video_bytes": 0}
+        self.kinds: Counter = Counter()       # packets received, by type
+        self.replies: dict[tuple[int, int, int], str] = {}   # (cmd set, cmd id, sender) -> reply payload
         self._session = random.randrange(0x1000, 0xFFFE)
         self._base_seq = random.randrange(0x1000, 0xF000) & 0xFFF8
         # Two separate sequences: link packets (handshake, acks) and data packets. Data packets chain to
@@ -175,14 +184,15 @@ class Datalink:
             self._data_seq = (seq + SEQ_STEP) & 0xFFFF
             self._data_count = (self._data_count + 1) & 0xFF
 
-    def send(self, cmd_set: int, cmd_id: int, payload: bytes = b"", receiver: int | None = None) -> int:
+    def send(self, cmd_set: int, cmd_id: int, payload: bytes = b"", receiver: int | None = None,
+             flags: int = FLAG_REQUEST) -> int:
         """Send a DUML request; returns its sequence number, which the camera's reply carries."""
         if receiver is None:
             receiver = ADDR_LIVEVIEW if (cmd_set, cmd_id) == (0x09, 0xA8) else ADDR_CAMERA
         with self._lock:
             seq = self._message_seq
             self._message_seq = (seq + 1) & 0xFFFF
-        self._send_data(Message(ADDR_APP, receiver, seq, FLAG_REQUEST, cmd_set, cmd_id, payload))
+        self._send_data(Message(ADDR_APP, receiver, seq, flags, cmd_set, cmd_id, payload))
         return seq
 
     def _answer(self, m: Message) -> None:
@@ -216,7 +226,30 @@ class Datalink:
         self.send(0x00, 0x99, topic_subscription("cam_status", 0x69DF))
         self.send(0x02, 0x09, bytes(10) + b"\x03")                   # live view source: camera
         self.send(0x09, 0xA8, bytes((0, 4, 2, 0, 0, 0, 0, 0, 0, 0)))  # start transmitting
-        log("Registered and live view requested")
+        if self.liveview == "action":
+            # Action series: register with the video encoder and trigger it (then keep it alive).
+            self.send(0x00, 0x81, APP_INFO_REPLY, ADDR_ENCODER_2, FLAG_WRITE)
+            self.send(0x00, 0x88, ENCODER_REGISTER, ADDR_ENCODER_1)
+            self._trigger_encoder()
+        log("Registered and live view requested" + (" (Action series)" if self.liveview == "action" else ""))
+
+    def _trigger_encoder(self) -> None:
+        self.send(0x00, 0x81, APP_INFO_REPLY, ADDR_ENCODER_2, FLAG_WRITE)
+        self.send(0x00, 0x82, b"\x00", ADDR_ENCODER_2, FLAG_WRITE)
+
+    def _heartbeat_loop(self) -> None:
+        tick = 0
+        while not self.stopped.wait(HEARTBEAT_INTERVAL):
+            tick += 1
+            try:
+                self.send(0x00, 0x4F, struct.pack("<BBBBBI", 1, 0, (tick // 2) & 0xFF, 0, 0, 0xFFFFFFFF),
+                          ADDR_ENCODER_2)
+                if tick % 5 == 0:
+                    self.send(0x00, 0x88, ENCODER_REGISTER, ADDR_ENCODER_1)
+                if tick % 10 == 0:
+                    self._trigger_encoder()
+            except OSError:
+                pass
 
     def _ack_loop(self) -> None:
         while not self.stopped.is_set():
@@ -228,6 +261,7 @@ class Datalink:
 
     def _receive(self) -> None:
         frames = _FrameAssembler(self._deliver_video)
+        video_at = 0.0                        # perf_counter() of the last video packet
         self._sock.settimeout(FRAME_IDLE)
         while not self.stopped.is_set():
             try:
@@ -242,24 +276,32 @@ class Datalink:
             if len(packet) < VIDEO_HEADER_SIZE:
                 continue
             _, _, seq, kind, _ = _HEADER.unpack_from(packet)
+            self.kinds[kind] += 1
             if kind == Packet.VIDEO:
                 self._cursors[0] = seq
                 self.last_video = time.monotonic()
+                video_at = now
                 self.stats["video_packets"] += 1
                 self.stats["video_bytes"] += len(packet) - VIDEO_HEADER_SIZE
                 frames.add(packet[FRAME_ID_OFFSET], packet[VIDEO_HEADER_SIZE:], now)
                 continue
             if kind == Packet.LINK and len(packet) >= 34:
+                # Until video flows (or while it is stalled), acknowledge the video cursor the camera
+                # reports itself: some models don't start their video channel otherwise.
+                if now - video_at > 0.5:
+                    self._cursors[0] = struct.unpack_from("<H", packet, 10)[0]
                 self._cursors[1] = struct.unpack_from("<H", packet, 18)[0]
                 self._cursors[2] = struct.unpack_from("<H", packet, 26)[0]
             elif kind == Packet.LINK_DATA:
                 self._cursors[1] = seq
-            if self.on_message or self.answer_requests:
-                for message in parse_all(packet[8:]):
-                    if self.answer_requests and message.needs_reply:
+            for message in parse_all(packet[8:]):
+                if message.needs_reply:
+                    if self.answer_requests:
                         self._answer(message)
-                    if self.on_message:
-                        self.on_message(message)
+                elif message.flags & FLAG_REPLY:
+                    self.replies[(message.cmd_set, message.cmd_id, message.sender)] = message.payload[:4].hex()
+                if self.on_message:
+                    self.on_message(message)
 
     def _deliver_video(self, data: bytes, first_packet: float) -> None:
         if self.on_video:
@@ -271,6 +313,8 @@ class Datalink:
             self._handshake()
             self._start_live_view()
             threading.Thread(target=self._ack_loop, daemon=True, name="datalink-ack").start()
+            if self.liveview == "action":
+                threading.Thread(target=self._heartbeat_loop, daemon=True, name="datalink-heartbeat").start()
             self._receive()
         finally:
             self.stopped.set()
@@ -278,3 +322,11 @@ class Datalink:
 
     def stop(self) -> None:
         self.stopped.set()
+
+    def summary(self) -> str:
+        """What the camera sent in this session (for the log when no video comes)."""
+        names = {int(k): k.name.lower() for k in Packet}
+        kinds = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(self.kinds.items())) or "none"
+        replies = ", ".join(f"{s:02x}/{i:02x} from {sender:02x}: {payload or '-'}"
+                            for (s, i, sender), payload in list(self.replies.items())[:12]) or "none"
+        return f"camera packets: {kinds}; replies: {replies}"

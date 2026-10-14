@@ -30,6 +30,12 @@ endorsed by or sponsored by DJI. OBS Studio is a project of the OBS Project.
   > OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
   > CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+- **dji-vcam** by razboy — <https://github.com/RB14/dji-vcam> — MIT License. How the Action series'
+  live view is started and kept alive (registration with the video encoder, the trigger and the 200 ms
+  heartbeat) and the video cursor of the status packets follow that project's protocol notes. No code
+  from it is included here. Its license: MIT License, Copyright (c) 2026 razboy, with the same
+  permission notice and disclaimer as quoted above for osmosis.
+
 - **osmo_nano_webcam** by Matis-ard — <https://github.com/Matis-ard/osmo_nano_webcam> — showed how
   the Osmo Nano's live view can be received over Wi-Fi. No code from it is included here.
 
