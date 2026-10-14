@@ -183,9 +183,17 @@ def current_network(interface: str | None = None) -> str:
         return ""
 
 
+def _decode(raw: bytes) -> str:
+    """netsh writes UTF-8 on current Windows versions and the OEM code page on older ones."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("oem", errors="replace")
+
+
 def _netsh(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["netsh", "wlan", *args], capture_output=True, text=True, encoding="oem",
-                          errors="replace")
+    result = subprocess.run(["netsh", "wlan", *args], capture_output=True)
+    return subprocess.CompletedProcess(result.args, result.returncode, _decode(result.stdout), _decode(result.stderr))
 
 
 def _turn_radio_on(name: str) -> None:

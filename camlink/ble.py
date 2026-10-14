@@ -195,8 +195,8 @@ class BleLink:
 
         device = await BleakScanner.find_device_by_filter(wanted, timeout=15)
         if device is None:
-            raise RuntimeError(("Camera " + address if address else "No DJI Osmo camera") + " found over "
-                               "Bluetooth (is it on, nearby, and not connected to the phone app?)")
+            raise RuntimeError((f"Camera {address} not found" if address else "No DJI Osmo camera found")
+                               + " over Bluetooth (is it on, nearby, and not connected to the phone app?)")
         self.address = device.address.upper()
         self.advert = heard.get(self.address)
         self.name = (self.advert or {}).get("name") or device.name or ""
