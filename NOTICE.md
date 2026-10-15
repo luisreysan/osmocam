@@ -41,7 +41,8 @@ endorsed by or sponsored by DJI. OBS Studio is a project of the OBS Project.
 
 - **OpenPocketCine** by Erik Sutton and contributors — <https://github.com/erik-sutton95/OpenPocketCine>
   — Apache License 2.0 (Copyright 2026 Erik Sutton and OpenPocketCine contributors). The live view's
-  picture header and private SEI follow that project's documentation. No code from it is included here.
+  picture header and private SEI, and the Osmo Pocket session and H.265 live view, follow that project's
+  documentation. No code from it is included here.
 
 ## Dependencies
 

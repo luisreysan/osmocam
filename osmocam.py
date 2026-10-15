@@ -32,7 +32,7 @@ from bleak.exc import BleakError
 from camlink import ble, datalink, models, wifi
 from camlink.registry import DEFAULT_TRANSPORT, CameraRegistry, other_transport
 from camlink.util import fine_timer, log
-from camlink.video import H264Decoder
+from camlink.video import VideoDecoder
 
 # The OBS Virtual Camera on Windows and macOS; on Linux, a v4l2loopback device (see the README).
 SYSTEM = "linux" if sys.platform.startswith("linux") else sys.platform
@@ -218,7 +218,7 @@ async def run(args: argparse.Namespace) -> None:
     stop = threading.Event()
     outputs = Outputs(not args.no_vcam, args.fps)
     await asyncio.to_thread(outputs.open_vcam)
-    decoder = H264Decoder(outputs.on_frame, stop)
+    decoder = VideoDecoder(outputs.on_frame, stop)
     decoder.start()
     if args.preview_port:
         start_preview(outputs, args.preview_port)

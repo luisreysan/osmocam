@@ -684,6 +684,51 @@ Osmo Nano has been tested with these apps.
 | `0x0017` | Osmo 360 | WPA3 Wi-Fi and 360° video: not supported |
 | `0x0018` | Osmo Action 6 | |
 | `0x0019` | Osmo Nano | tested |
-| `0x0020` | Osmo Pocket 3 | |
-| `0x0021` | Osmo Pocket 4 | |
-| `0x0022` | Osmo Pocket 4 Pro | |
+| `0x0020` | Osmo Pocket 3 | H.264 live view; gimbal, zoom (12.1) |
+| `0x0021` | Osmo Pocket 4 | H.265 live view; gimbal, zoom (12.1) |
+| `0x0022` | Osmo Pocket 4 Pro | H.265 live view; gimbal, zoom (12.1); BLE name `OsmoPocket4P-…` |
+
+### 12.1 Osmo Pocket 3 / 4 / 4 Pro
+
+Follows the OpenPocketCine project's notes, which verified these on the cameras; not exercised with
+Osmo Client yet.
+
+**Session** (same handshake, poke, picture header and acknowledgements as the Nano):
+
+1. Number the first command from the camera's first 34-byte status packet (type 1): its u16 at offset 8,
+   plus 8. Starting from the handshake alone gave slow or failed starts.
+2. `00/81` → `0x48`, flags `0x80`, the 62-byte app record; `00/88` → `0x28` (`17 00 46 23 7C 'APP' 00×5
+   02`); `03/DA [05 FF FF FF FF]` → `0x03` (the gimbal learns an app is attached); the topic subscriptions.
+3. `02/68 [08]` → `0x01`, then `09/A8` (same payload as the Nano's) → **`0x08`**. No `02/09`.
+4. `00/88` again every second: the video stops 8-10 s after the last one.
+
+A pairing reply `00 06` means "try again in a moment". On 5.8 GHz the access point can take about a
+minute to appear.
+
+**Live view:** the Pocket 3 sends H.264; the Pocket 4 and 4 Pro send **H.265** (1280×720, ~25 fps) in the
+same picture header. Tell them apart by the parameter sets of the first keyframe: H.265 VPS/SPS/PPS start
+`40 01` / `42 01` / `44 01`, H.264 SPS/PPS `67` / `68` (an H.265 `28 01` keyframe is not an H.264 PPS).
+
+**Photo mode** is `0x17` on the Pocket 4 / 4 Pro (`0x05` on the Pocket 3 and the Nano).
+
+**Gimbal**, command set `0x04` → `0x04` (flags `0x40`, acknowledged `00`):
+
+| action | command | payload |
+|---|---|---|
+| recenter | `04/4C` | `FE 08` |
+| turn 180° (front / selfie) | `04/4C` | `FE 09` |
+| follow / tilt locked | `04/4C` + `04/50` | `02 08` + `00 04 01 00` / `00 04 01 01` |
+| FPV / direction lock | `04/4C` | `01 08` / `00 08` |
+| speed | `04/50` | `00 05 01 <00 fast, 01 normal, 02 slow>` |
+| stick | `04/01`, flags `0x00` (no reply) | `<tilt u16> 00 00 <pan u16> 00 80 22 00` |
+
+Stick axes: 1024 = centre, ± 550 (values beyond are ignored), tilt up and pan right positive. Send it
+about every 50 ms while held, then **one** centred packet: a stream of centred packets pauses the video.
+Past ±165° of pan (turned 180°) left and right swap. The attitude comes as `04/05` (50 bytes): pan i16 at
+4, tilt = −i16 at 20 (0.1°), mode = byte 6 >> 6 (0 direction lock, 1 FPV, 2 follow).
+
+**Zoom**, `02/B8` → `0x01`: `0A 4E <lens u16>` goes to a factor (lens = 217 × factor: 1× 217, 3× 651,
+12× 2604); `01 <rate 48-4E> <01 in, 00 out> 00` while held, `FF 00 00 00` to stop. Read back from the
+`cam_lens_state` topic (u16 at 14). Stops: Pocket 3 and 4 1×/2×/4× (Pocket 3: up to 2× at 4K, 3× at 2.7K,
+4× at 1080p), Pocket 4 Pro 1×/3×/6×/12×; Slow-mo, Timelapse and Super Night stay at 1× (4 Pro: 1×/3×).
+The Pocket 4 Pro refuses to zoom in D-Log2.

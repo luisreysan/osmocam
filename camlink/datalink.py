@@ -29,7 +29,9 @@ from enum import IntEnum
 from functools import reduce
 
 from .duml import FLAG_REPLY, FLAG_REQUEST, Message, parse_all
-from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_ENCODER_1, ADDR_ENCODER_2, ADDR_LIVEVIEW, ADDR_TOPICS,
+from .nal import CODEC_NAMES, parameter_sets
+from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_ENCODER_1, ADDR_ENCODER_2, ADDR_GIMBAL_APP, ADDR_LIVEVIEW,
+                       ADDR_LIVEVIEW_POCKET, ADDR_TOPICS,
                        APP_INFO_REPLY, CAMERA_HOST, DATALINK_PORT, ENCODER_REGISTER, POKE_PORT,
                        REGISTER_PAYLOAD, pairing_message, topic_subscription)
 from .util import log
@@ -51,12 +53,14 @@ PRIVATE_SEI_SIZE = 3 + 3 + 25 + 1
 # Cameras without the picture header: a picture arrives as a burst of packets less than 0.3 ms apart, then
 # ~30 ms of silence until the next one, so it is handed to the decoder after 5 ms of silence.
 FRAME_IDLE = 0.005
-SPS_4 = b"\x00\x00\x00\x01\x67"
-SPS_3 = b"\x00\x00\x01\x67"
 # Action series: its video encoder streams only while it gets a heartbeat every 200 ms, with the app's
 # registration again every second and the live view trigger every two seconds.
 HEARTBEAT_INTERVAL = 0.2
 FLAG_WRITE = 0x80               # what the encoder's registration and trigger are sent with
+# Osmo Pocket: its video stops 8-10 s after the app last said it is there (0x00/0x88), so it is said every
+# second. The first command sequence follows the camera's first 34-byte status packet (u16 at 8, + 8).
+PRESENCE_INTERVAL = 1.0
+TELEMETRY_WAIT = 2.0
 
 # Handshake: the client's base sequence, then one parameter block per channel (the values the camera
 # accepts; the meaning of each field is not documented), then a fixed tail.
@@ -122,8 +126,8 @@ class _FrameAssembler:
     groups (byte 16 of the packet; an Osmo Nano group ends after 63 packets, and a keyframe can be bigger),
     so the group number must not split pictures. A gap in the packet sequence means a lost packet: the part
     that arrived is handed on and the decoder conceals the rest. Cameras that send no picture header are
-    split on the group number and after a short silence instead. Nothing is handed on before the first SPS,
-    so the decoder always starts on a keyframe."""
+    split on the group number and after a short silence instead. Nothing is handed on before the first
+    parameter sets (H.264 SPS or H.265 VPS), so the decoder always starts on a keyframe."""
 
     def __init__(self, deliver: Callable[[bytes, float], None]) -> None:
         self._deliver = deliver
@@ -196,14 +200,12 @@ class _FrameAssembler:
             self._lost()
         data = strip_private_sei(data)
         if not self._synced:
-            start = data.find(SPS_4)
-            if start < 0:
-                start = data.find(SPS_3)
-            if start < 0:
+            found = parameter_sets(data)
+            if found is None:
                 return
             self._synced = True
-            log("First keyframe received: video is flowing")
-            data = data[start:]
+            log(f"First keyframe received ({CODEC_NAMES[found[1]]}): video is flowing")
+            data = data[found[0]:]
         if data:
             self._deliver(data, self._first_packet)
 
@@ -218,7 +220,8 @@ class Datalink:
                  on_message: Callable[[Message], None] | None = None, liveview: str = "nano",
                  topics: tuple[str, ...] = (), start_live_view: bool = True) -> None:
         self.host, self.port = host, port
-        self.liveview = liveview              # "nano" or "action": see camlink.models.liveview_mode
+        self.liveview = liveview              # "nano", "pocket" or "action": see camlink.models.liveview_mode
+        self._liveview_addr = ADDR_LIVEVIEW_POCKET if liveview == "pocket" else ADDR_LIVEVIEW
         self.topics = topics                  # named status topics to subscribe to (pushed as 0x00/0x99)
         self.start_live_view = start_live_view  # False: handshake only (e.g. to ask the camera who it is)
         self.on_video = on_video
@@ -266,7 +269,7 @@ class Datalink:
              flags: int = FLAG_REQUEST) -> int:
         """Send a DUML request; returns its sequence number, which the camera's reply carries."""
         if receiver is None:
-            receiver = ADDR_LIVEVIEW if (cmd_set, cmd_id) == (0x09, 0xA8) else ADDR_CAMERA
+            receiver = self._liveview_addr if (cmd_set, cmd_id) == (0x09, 0xA8) else ADDR_CAMERA
         with self._lock:
             seq = self._message_seq
             self._message_seq = (seq + 1) & 0xFFFF
@@ -296,8 +299,47 @@ class Datalink:
                 if len(data) >= 8 and data[6] == Packet.HANDSHAKE:
                     self._link_seq = self._data_seq = (self._base_seq + SEQ_STEP) & 0xFFFF
                     log("Datalink handshake OK")
+                    if self.liveview == "pocket":
+                        self._sequence_from_telemetry()
                     return
         raise RuntimeError(f"The camera did not answer the datalink handshake on {self.host}:{self.port}")
+
+    def _sequence_from_telemetry(self) -> None:
+        """Osmo Pocket: number the commands from the camera's first 34-byte status packet (u16 at 8, + 8);
+        starting from the handshake alone gave slow or failed starts."""
+        deadline = time.monotonic() + TELEMETRY_WAIT
+        while time.monotonic() < deadline:
+            try:
+                data, _ = self._sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            if len(data) == 34 and data[6] == Packet.LINK:
+                self._data_seq = (struct.unpack_from("<H", data, 8)[0] + SEQ_STEP) & 0xFFFF
+                return
+        log("No status packet from the camera after the handshake; numbering commands from the handshake")
+
+    def _start_pocket_live_view(self) -> None:
+        """Osmo Pocket: register with the encoder, say the app is there, tell the gimbal an app is attached,
+        subscribe, then prepare (0x02/0x68 [08]) and request the live view from its transmitter (0x08). No
+        0x02/0x09 (the Nano's). Each step gets a moment for its acknowledgement."""
+        steps = [(0x00, 0x81, APP_INFO_REPLY, ADDR_ENCODER_2, FLAG_WRITE),
+                 (0x00, 0x88, ENCODER_REGISTER, ADDR_ENCODER_1, FLAG_REQUEST),
+                 (0x03, 0xDA, bytes.fromhex("05ffffffff"), ADDR_GIMBAL_APP, FLAG_REQUEST)]
+        steps += [(0x00, 0x99, topic_subscription(name, 0x6A00 + i), ADDR_TOPICS, FLAG_REQUEST)
+                  for i, name in enumerate(self.topics)]
+        steps += [(0x02, 0x68, b"\x08", ADDR_CAMERA, FLAG_REQUEST)]
+        for cmd_set, cmd_id, payload, receiver, flags in steps:
+            self.send(cmd_set, cmd_id, payload, receiver, flags)
+            time.sleep(0.03)
+        self.request_keyframe()
+        log("Registered and live view requested (Osmo Pocket)")
+
+    def _presence_loop(self) -> None:
+        while not self.stopped.wait(PRESENCE_INTERVAL):
+            try:
+                self.send(0x00, 0x88, ENCODER_REGISTER, ADDR_ENCODER_1)
+            except OSError:
+                pass
 
     def _start_live_view(self) -> None:
         self.send(0x00, 0x81, REGISTER_PAYLOAD)                      # register as an app
@@ -395,10 +437,17 @@ class Datalink:
         self._sock.settimeout(0.25)
         try:
             self._handshake()
-            if self.start_live_view:
+            if self.liveview == "pocket":
+                # acknowledgements run from the start: the Pocket's registration steps expect them
+                threading.Thread(target=self._ack_loop, daemon=True, name="datalink-ack").start()
+                if self.start_live_view:
+                    self._start_pocket_live_view()
+                threading.Thread(target=self._presence_loop, daemon=True, name="datalink-presence").start()
+            elif self.start_live_view:
                 self._start_live_view()
             self.ready.set()
-            threading.Thread(target=self._ack_loop, daemon=True, name="datalink-ack").start()
+            if self.liveview != "pocket":
+                threading.Thread(target=self._ack_loop, daemon=True, name="datalink-ack").start()
             if self.liveview == "action":
                 threading.Thread(target=self._heartbeat_loop, daemon=True, name="datalink-heartbeat").start()
             self._receive()

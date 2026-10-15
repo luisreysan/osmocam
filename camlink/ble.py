@@ -41,6 +41,7 @@ JOIN_RETRY = b"\x01\xff"                       # refused for now: seen first on 
 
 PAIR_ALREADY = 0x01
 PAIR_NEEDS_APPROVAL = 0x02
+PAIR_LATER = 0x06               # busy (seen on the Osmo Pocket): try again in a few seconds
 
 UNAVAILABLE_HINT = ("is Bluetooth on? On macOS, allow Bluetooth for the Terminal app (System Settings > Privacy & "
                     "Security > Bluetooth); on Linux, BlueZ (bluetoothd) must be running")
@@ -255,6 +256,8 @@ class BleLink:
         while not self._paired.is_set():
             if self.disconnected.is_set():
                 raise RuntimeError("The camera dropped the Bluetooth link while pairing")
+            if self._pair_status == PAIR_LATER:
+                raise RuntimeError("The camera asked to pair again in a moment")
             if self._refused:
                 raise RuntimeError("Pairing was not approved on the camera screen")
             elapsed = time.monotonic() - started
