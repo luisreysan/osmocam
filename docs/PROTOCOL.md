@@ -648,11 +648,12 @@ In playback the microSD fields can read 0: keep the last non-zero values.
      plays in a browser).
 6. **Favourite** (kept by the camera with the file): `02/BF [01 01 <handle u32> <counter u32> 00 <0|1> 00 00 00]`,
    `counter` = any number that changes with each request.
-7. **Delete**: `00/28 [01 <handle u32> <counter u32> 00 01 00 00 00 01 01 00 00]`, reply `00` = deleted.
-   Never send it twice for the same file. Osmo Client only offers it when started with `--allow-delete`.
+7. **Delete**: `00/28 [01 <handle u32> <counter u32> 00 01 00 00 00 01 01 00 00]`, reply `00 00` = deleted.
+   Never send it twice for the same file. Osmo Client asks for confirmation first (`--no-delete` hides it).
 
-Items 6 and 7 follow the OpenPocketCine project's notes (the delete layout is the one osmosis documents);
-they have not been exercised on a camera with Osmo Client yet.
+Items 6 and 7 follow the OpenPocketCine project's notes (the delete layout is the one osmosis documents).
+Both verified on an Osmo Nano: the favourite mark shows on the camera, and a deleted file is gone from the
+next listing.
 
 ## 10. Power and sleep
 
