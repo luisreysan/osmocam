@@ -147,6 +147,27 @@ While connected over BLE the camera may push named status topics as `00/99` fram
 - Every Osmo camera uses the same address, so files listed on one camera must not be requested from
   another.
 
+### 4.1 Joining another network (station mode)
+
+Instead of running its access point, the camera can join a Wi-Fi network as a station (a router, or a
+computer's hotspot). The computer then keeps its own connection, and several cameras can share one
+network. Over BLE, to receiver `07`:
+
+| step | command | payload | reply |
+|---|---|---|---|
+| read the role | `07/39` | `00` | `00 00` access point, `00 01` station; the Osmo Nano answers `E0` (no read) |
+| become a station | `07/48` | `01` | `00 00` (Osmo Nano: `00`); wait ~10 s before joining |
+| join a network | `07/47` | `<len> <SSID> <len> <password>` | `00 00` or `00 00 00` joined; `01 FF` refused for now (retry after 5 s; seen on WPA3-only networks) |
+| back to its access point | `07/48` | `00` | `00` / `00 00` |
+
+The join can take up to ~45 s to answer. On the network the camera gets an address by DHCP and serves
+the same TCP 7001 poke, UDP 9004 datalink and HTTP media as on its own access point. To find it, try TCP
+7001 on the local network, open a datalink with each host that answers and ask `07/07` (to receiver
+`07`): the reply is the name of the camera's own access point, the same as over BLE, which tells the
+cameras apart. WPA3-only networks are refused by the Osmo Nano; WPA2 (or WPA2/WPA3) works. Guest networks
+that keep devices apart don't work. Osmo Client's implementation of this section follows the
+OpenPocketCine project's notes and has not been exercised on a camera yet.
+
 ## 5. The UDP datalink
 
 `camlink/datalink.py`.
@@ -277,12 +298,27 @@ show "connecting…" every few seconds.
 
 ### 5.8 Video
 
-Type-2 packets carry H.264 (Annex-B) after a 20-byte header; byte 16 is the frame id. All packets of
-one frame share the frame id; concatenating their payloads gives one access unit. There is no
-end-of-frame marker (byte 18 counts fragments but there is no total), but a frame arrives as a burst
-of packets less than 0.3 ms apart followed by ~30 ms of silence, so a frame can be handed to the decoder
-after ~5 ms without new packets. Packets of a frame already handed on can be dropped. Start decoding at
-the first SPS (`00 00 00 01 67`).
+Type-2 packets carry H.264 (Annex-B) after a 20-byte header (8-byte link header + 12 bytes). Their
+header sequence advances by 8 per packet, so a gap means a lost packet. Byte 16 is a transport group
+number, not a picture id: on the Osmo Nano a group ends after 63 packets, and a keyframe can be bigger
+than that, so a picture can span two groups.
+
+The first packet of each picture starts with a 16-byte picture header:
+
+| offset | size | content |
+|---|---|---|
+| 0 | 4 | `00 00 01 FF` |
+| 4 | 4 | size of the access unit (u32 LE) |
+| 8 | 8 | metadata |
+
+The access unit follows; collect packets until that many bytes have arrived. Each picture from the Nano
+also carries a private SEI: `00 00 01 06 F0 19`, 25 raw bytes, `80`. Those bytes are not escaped and can
+contain `00 00 01`, so remove the whole SEI (by its fixed length) before decoding. Start decoding at the
+first SPS (`00 00 00 01 67`).
+
+Without picture headers (not seen on the Nano), split pictures on the group number: a picture arrives as
+a burst of packets less than 0.3 ms apart followed by ~30 ms of silence, so it can be handed to the
+decoder after ~5 ms without new packets.
 
 The Nano's live view is 1280×720 at 30 fps (960×720 when the camera records 4:3), about 6 Mbit/s,
 without B-frames.
@@ -341,6 +377,10 @@ Each capture mode keeps its own exposure and format: after `02/E1`, read them ag
 | set ISO | `02/2A` | `<code>` | Manual only (`E3` in Auto) |
 | read shutter | `02/29` | | `00 01 <u16> <decimal>` (`DF` in Auto) |
 | set shutter | `02/28` | `01 <u16> <decimal> 00 00 00` | Manual only |
+| set exposure compensation | `02/2E` | `<10 + thirds of a stop>` | Auto only; `07` = −3 EV … `10` = 0 … `19` = +3 EV |
+
+The exposure compensation in use, and the camera's own light meter, are in the `cam_expo_param` topic
+(8.3).
 
 ISO codes (one stop each): `03`=100, `04`=200, `05`=400, `06`=800, `07`=1600, `08`=3200, `09`=6400,
 `0A`=12800, `0B`=25600, `0C`=51200. (`01`/`02` behave like `03`, `0D` like `0C`.) What a capture mode
@@ -401,6 +441,36 @@ set it to 2 explicitly in Video mode.
 `02/2C [mode, kelvin / 100, 00, 00, 00]`, read with `02/2D`. Mode `00` = Auto, `06` = manual colour
 temperature, 2000-10000 K. In Auto the camera remembers the last manual temperature.
 
+### 7.5 Image
+
+What each capture mode offers is in the `camcap_*` tables (8.4); the values in use are in the
+`cam_image_effect` topic (8.3). Not yet checked on a camera with Osmo Client: the layouts match the
+tables an Osmo Nano publishes.
+
+| setting | command | payload | values |
+|---|---|---|---|
+| colour profile | `02/42` | `<code>` | `00` Normal, `3F` Normal 10-bit, `3D` D-Log M (Nano, video modes); other models also use `3C` HLG, `17` D-Log, `41` D-Log2 |
+| sharpness | `02/38` | `<s8>` | Nano: −2 … +2 |
+| noise reduction | `02/44` | `<s8>` | Nano: −2 … +1 |
+| field of view | `02/8E` | `01 01 09 00 01 <value>` | `00` Ultra Wide, `01` Wide, `02` Standard, `05` Natural Wide (Nano: `02 01 05`) |
+| stabilisation | `02/8E` | `01 01 08 00 01 <value>` | `00` Off, `01` RockSteady, `02` HorizonSteady, `03` RockSteady+, `04` HorizonBalancing |
+
+Field of view and stabilisation are read with `02/8E [00 01 <type u16>]` → `00 00 01 <type u16> 01 <value>`.
+
+### 7.6 Timelapse and hyperlapse
+
+Both use `02/6C` with a 16-byte payload; the settings in use are in the `cam_lapse_param` topic (8.3).
+
+```
+timelapse:  04 00 <keep> <interval u16, 0.1 s> <duration u32, s; 0 = until stopped> 00×7
+hyperlapse: 0B 00 00 <speed u16; 0 = auto> 00×11
+```
+
+`keep` is what a timelapse saves besides the video: `00` nothing, `02` JPEG, `03` RAW. The intervals
+and durations a camera offers are in `camcap_photo_timer_interval` and `camcap_timelapse_duration`, the
+hyperlapse speeds in `camcap_hyperlapse_ratio` (8.4). Not yet checked on a camera with Osmo Client: the
+lists match the Nano's tables exactly (intervals 0.5 s to 1 h, durations 5 min to 5 h).
+
 ## 8. Status pushes
 
 After registration the camera pushes, without being asked:
@@ -410,6 +480,7 @@ After registration the camera pushes, without being asked:
 | `02/80` | `0x01` | ~10/s | camera status (8.1) |
 | `0D/02` | `0x05` | ~1/s | battery (8.2) |
 | `00/99` | `0x28` | varies | named status topics the app subscribed to (8.3) |
+| `02/DC` | `0x01` | on change | storage of each store (8.5) |
 
 ### 8.1 Camera status `02/80`
 
@@ -477,7 +548,16 @@ Those that arrive as requests (flags `0x40`) must be answered (section 5.7).
 
 `cam_expo_param` gives the exposure actually in use, also in Auto: ISO = u32 at data offset 16
 (any value, e.g. 2509 in Auto), shutter = u16 at data offset 20 (same encoding as section 7.1, without
-the decimal digit).
+the decimal digit). Offset 6 is the exposure compensation set and offset 15 the camera's light meter,
+both as `10` + thirds of a stop (the meter says how far the picture is from the exposure the camera
+considers correct, which is useful in Manual).
+
+Pushed only when they change (and once on subscribing):
+
+| topic | data |
+|---|---|
+| `cam_image_effect` | offset 2: colour profile (7.5); 14: noise reduction (s8); 15: sharpness (s8) |
+| `cam_lapse_param` | 0: what a timelapse keeps; 1: interval (u16, 0.1 s); 3: shortest interval (u16, 0.1 s); 5: duration (u32, s); 9: hyperlapse speed (u16) |
 
 ### 8.4 Capability tables (`camcap_*`)
 
@@ -501,13 +581,29 @@ Most tables are a count followed by that many entries:
 | `camcap_wb` | minimum K / 100, `00`, maximum K / 100, `00`, 4 bytes, count, white balance modes | 2000-10000 K; `00`, `06` |
 | `camcap_exposure_mode` | `00`, count, exposure modes (`02/1E`) | `01`, `04` |
 
-Osmo Client uses the first six and falls back to the Nano's tables (section 7) until they arrive. Others
-the Nano publishes (count and values unless noted): `camcap_capture_aspect_type`, `camcap_color_mode`,
-`camcap_eis`, `camcap_fov`, `camcap_iso_auto_max`, `camcap_sharpness` and `camcap_denoise` (signed),
-`camcap_hyperlapse_ratio` (`00` = auto, then 2, 5, 10, 15, 30), `camcap_timelapse_duration` (u32 s),
-`camcap_countdown` (u32 ms), `camcap_loop_video_duration` (u16 s), `camcap_slowmotion_ratio` (pairs of
-base fps code and factor). Its mode `34` is not handled by the apps yet; it lists two more resolution
-codes, `42` and `43`.
+| `camcap_color_mode`, `camcap_fov`, `camcap_eis` | count, values (section 7.5) | Video: `00 3F 3D`; `02 01 05`; `00 01` |
+| `camcap_sharpness`, `camcap_denoise` | count, signed values | −2 … +2; −2 … +1 |
+| `camcap_photo_timer_interval` | 4 bytes, count, then per entry: kind, seconds (u16), milliseconds (u16) | Timelapse: 19 intervals, 0.5 s to 1 h |
+| `camcap_timelapse_duration` | count, durations (u32, s; 0 = until stopped) | 0, 5 min … 5 h |
+| `camcap_hyperlapse_ratio` | count, speeds (0 = auto) | Auto, 2, 5, 10, 15, 30 |
+
+Osmo Client uses these and falls back to the Nano's tables (section 7) for the first six until they
+arrive; the settings of sections 7.5 and 7.6 are only offered when the camera lists them. A mode
+without a setting sends its table empty (count 0: `camcap_eis` in Photo). Others the Nano publishes (count and
+values unless noted): `camcap_capture_aspect_type`, `camcap_iso_auto_max`, `camcap_countdown` (u32 ms),
+`camcap_loop_video_duration` (u16 s), `camcap_slowmotion_ratio` (pairs of base fps code and factor). Its
+mode `34` is not handled by the apps yet; it lists two more resolution codes, `42` and `43`.
+
+### 8.5 Storage `02/DC`
+
+| offset | size | field |
+|---|---|---|
+| 6 | 4 | microSD total, MB |
+| 10 | 4 | microSD free, MB |
+| 24 | 4 | internal memory total, MB (payloads of 32 bytes or more) |
+| 28 | 4 | internal memory free, MB |
+
+In playback the microSD fields can read 0: keep the last non-zero values.
 
 ## 9. Media library and downloads
 
@@ -535,16 +631,28 @@ codes, `42` and `43`.
    | T-14 | u32 size, bytes |
    | T-10 | u32 handle (bit 30 set = internal memory) |
    | T-6 | u16 duration, s |
+   | T-3 | resolution code (video; section 7.2) |
    | T-2 | type: `03` video, `00` photo |
+   | T-1 | `FF` / `FE` |
+   | T+8 | favourite: `01` (on the Osmo Nano; on other layouts this byte can be a length) |
 
    followed by TLVs: `0d <len> <file name>`, `1a <len> 00 00 00 01 <path without extension>`,
-   `1a <len> 00 00 00 02 <thumbnail path>`.
+   `1a <len> 00 00 00 02 <thumbnail path>`. A video's frame rate is a u32 numerator followed by a u32
+   denominator of 1000 or 1001 within its record (60000/1001 = 59.94 fps). Some layouts mark a favourite
+   with `01` right after `1b 0a 00 00 00 02 02 01 14 02 15 03` instead.
 5. **Download**: the camera runs an HTTP server on port 80:
    `GET http://192.168.2.1/v2?storage=<1 internal | 0 dock microSD>&path=<path>.<EXT>`. Range requests
    work (206), so interrupted downloads can resume.
    - Thumbnail: the thumbnail path + `.THM` (JPEG, 256×144 or 256×192).
    - Low-resolution preview of a video: the video path with `.LRF` instead of `.MP4` (H.264 720p MP4,
      plays in a browser).
+6. **Favourite** (kept by the camera with the file): `02/BF [01 01 <handle u32> <counter u32> 00 <0|1> 00 00 00]`,
+   `counter` = any number that changes with each request.
+7. **Delete**: `00/28 [01 <handle u32> <counter u32> 00 01 00 00 00 01 01 00 00]`, reply `00` = deleted.
+   Never send it twice for the same file. Osmo Client only offers it when started with `--allow-delete`.
+
+Items 6 and 7 follow the OpenPocketCine project's notes (the delete layout is the one osmosis documents);
+they have not been exercised on a camera with Osmo Client yet.
 
 ## 10. Power and sleep
 

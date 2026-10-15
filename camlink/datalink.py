@@ -35,13 +35,21 @@ from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_ENCODER_1, ADDR_ENCODER_2, AD
 from .util import log
 
 _HEADER = struct.Struct("<HHHBB")
-VIDEO_HEADER_SIZE = 20          # video packets: 8-byte link header + 12 bytes, frame id at offset 16
-FRAME_ID_OFFSET = 16
+VIDEO_HEADER_SIZE = 20          # video packets: 8-byte link header + 12 bytes, transport group at offset 16
+GROUP_OFFSET = 16
 SEQ_STEP = 8                    # sequences advance in steps of 8
 ACK_INTERVAL = 0.025
-# A video frame arrives as a burst of packets less than 0.3 ms apart, then ~30 ms of silence until the
-# next one. Handing a frame to the decoder after 5 ms of silence (instead of when the next frame starts)
-# saves ~30 ms of latency and never splits a frame.
+# The first packet of each picture starts with 00 00 01 FF, the size of the access unit (u32 LE) and 8
+# bytes of metadata; the access unit follows.
+PICTURE_MAGIC = b"\x00\x00\x01\xff"
+PICTURE_HEADER_SIZE = 16
+# The Osmo Nano adds a private SEI to each picture: NAL type 6, payload type 0xF0, 25 raw bytes, then the
+# 0x80 stop bit. The raw bytes are not escaped and can contain 00 00 01, which a decoder would read as the
+# start of another NAL unit, so the whole SEI is removed.
+PRIVATE_SEI = b"\x00\x00\x01\x06\xf0\x19"
+PRIVATE_SEI_SIZE = 3 + 3 + 25 + 1
+# Cameras without the picture header: a picture arrives as a burst of packets less than 0.3 ms apart, then
+# ~30 ms of silence until the next one, so it is handed to the decoder after 5 ms of silence.
 FRAME_IDLE = 0.005
 SPS_4 = b"\x00\x00\x00\x01\x67"
 SPS_3 = b"\x00\x00\x01\x67"
@@ -92,36 +100,101 @@ def poke(host: str = CAMERA_HOST) -> None:
         log(f"Datalink poke failed ({error}), continuing")
 
 
+def strip_private_sei(unit: bytes) -> bytes:
+    """Remove the camera's private SEI (see PRIVATE_SEI) from an access unit, by its fixed length."""
+    start = 0
+    while (i := unit.find(PRIVATE_SEI, start)) >= 0:
+        end = i + PRIVATE_SEI_SIZE
+        if end > len(unit) or unit[end - 1] != 0x80:
+            start = i + 1
+            continue
+        if i > 0 and unit[i - 1] == 0:
+            i -= 1                            # 4-byte start code
+        unit = unit[:i] + unit[end:]
+        start = i
+    return unit
+
+
 class _FrameAssembler:
-    """Joins the packets of one video frame (same frame id) into a single H.264 access unit. Nothing is
-    handed on before the first SPS, so the decoder always starts on a keyframe."""
+    """Rebuilds the access units of the live view from the video packets.
+
+    A picture is complete once the size its header announces has arrived. It can span several transport
+    groups (byte 16 of the packet; an Osmo Nano group ends after 63 packets, and a keyframe can be bigger),
+    so the group number must not split pictures. A gap in the packet sequence means a lost packet: the part
+    that arrived is handed on and the decoder conceals the rest. Cameras that send no picture header are
+    split on the group number and after a short silence instead. Nothing is handed on before the first SPS,
+    so the decoder always starts on a keyframe."""
 
     def __init__(self, deliver: Callable[[bytes, float], None]) -> None:
         self._deliver = deliver
         self._data = bytearray()
-        self._frame: int | None = None
-        self._finished: int | None = None     # frame handed on last: late packets of it are dropped
+        self._need = 0                        # bytes still missing from the current picture
+        self._headers = False                 # this camera sends picture headers
+        self._group: int | None = None        # without headers: group being joined
+        self._finished: int | None = None     # without headers: group handed on last (late packets dropped)
+        self._next_seq: int | None = None
         self._first_packet = 0.0
         self._last_packet = 0.0
         self._synced = False
+        self._dropping = False                # dropping the rest of a picture whose first packet was lost
+        self.truncated = 0                    # pictures broken by lost packets (cut short, or dropped)
 
-    def add(self, frame_id: int, data: bytes, now: float) -> None:
-        if frame_id == self._finished:
+    def _lost(self) -> None:
+        self.truncated += 1
+        if self.truncated == 1:
+            log("Live view: a picture arrived incomplete (lost packets)")
+
+    def add(self, seq: int, group: int, data: bytes, now: float) -> None:
+        lost = self._next_seq is not None and seq != self._next_seq
+        self._next_seq = (seq + SEQ_STEP) & 0xFFFF
+        if data[:4] == PICTURE_MAGIC and len(data) >= PICTURE_HEADER_SIZE:
+            if self._data:
+                self.finish(short=True)       # the previous picture never completed
+            elif lost and not self._dropping:
+                self._lost()                  # whole packets (a small picture?) went missing in between
+            self._dropping = False
+            self._headers = True
+            self._need = int.from_bytes(data[4:8], "little")
+            self._first_packet = now
+            data = data[PICTURE_HEADER_SIZE:]
+        elif self._need:
+            if lost:
+                self.finish(short=True)       # the rest of this picture can't be placed: drop it
+                self._dropping = True
+                return
+        elif self._headers:
+            if not self._dropping:            # the rest of a picture whose first packet was lost
+                self._dropping = True
+                self._lost()
             return
-        if self._frame is not None and frame_id != self._frame:
-            self.finish()
-        if self._frame is None:
-            self._frame, self._first_packet = frame_id, now
-        self._data += data
+        else:
+            if group == self._finished:
+                return
+            if self._group is not None and group != self._group:
+                self.finish()
+            if self._group is None:
+                self._group, self._first_packet = group, now
+            self._data += data
+            self._last_packet = now
+            return
+        part = data[:self._need]
+        self._data += part
+        self._need -= len(part)
         self._last_packet = now
+        if not self._need:
+            self.finish()
 
     def finish_if_idle(self, now: float) -> None:
-        if self._frame is not None and now - self._last_packet >= FRAME_IDLE:
+        if self._group is not None and now - self._last_packet >= FRAME_IDLE:
             self.finish()
 
-    def finish(self) -> None:
+    def finish(self, short: bool = False) -> None:
         data, self._data = bytes(self._data), bytearray()
-        self._finished, self._frame = self._frame, None
+        self._need = 0
+        self._finished, self._group = self._group, None
+        if short:
+            self._lost()
+        data = strip_private_sei(data)
         if not self._synced:
             start = data.find(SPS_4)
             if start < 0:
@@ -143,10 +216,11 @@ class Datalink:
     def __init__(self, port: int = DATALINK_PORT, host: str = CAMERA_HOST,
                  on_video: Callable[[bytes, float], None] | None = None,
                  on_message: Callable[[Message], None] | None = None, liveview: str = "nano",
-                 topics: tuple[str, ...] = ()) -> None:
+                 topics: tuple[str, ...] = (), start_live_view: bool = True) -> None:
         self.host, self.port = host, port
         self.liveview = liveview              # "nano" or "action": see camlink.models.liveview_mode
         self.topics = topics                  # named status topics to subscribe to (pushed as 0x00/0x99)
+        self.start_live_view = start_live_view  # False: handshake only (e.g. to ask the camera who it is)
         self.on_video = on_video
         self.on_message = on_message
         # The camera sends requests of its own ("who are you" about once a second, status topics...). They
@@ -154,6 +228,7 @@ class Datalink:
         # showing "connecting...").
         self.answer_requests = True
         self.stopped = threading.Event()
+        self.ready = threading.Event()        # handshake done and live view requested: send() works
         self.last_video = 0.0                 # monotonic() of the last video packet
         self.stats = {"packets": 0, "video_packets": 0, "video_bytes": 0}
         self.kinds: Counter = Counter()       # packets received, by type
@@ -170,6 +245,7 @@ class Datalink:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.bind(("0.0.0.0", 0))
         self._lock = threading.Lock()
+        self.frames: _FrameAssembler | None = None   # live view assembly (its counters), once receiving
 
     # ---- sending
     def _send_link(self, kind: int, body: bytes) -> None:
@@ -228,13 +304,18 @@ class Datalink:
         for i, name in enumerate(self.topics):
             self.send(0x00, 0x99, topic_subscription(name, 0x6A00 + i), ADDR_TOPICS)
         self.send(0x02, 0x09, bytes(10) + b"\x03")                   # live view source: camera
-        self.send(0x09, 0xA8, bytes((0, 4, 2, 0, 0, 0, 0, 0, 0, 0)))  # start transmitting
+        self.request_keyframe()                                      # start transmitting
         if self.liveview == "action":
             # Action series: register with the video encoder and trigger it (then keep it alive).
             self.send(0x00, 0x81, APP_INFO_REPLY, ADDR_ENCODER_2, FLAG_WRITE)
             self.send(0x00, 0x88, ENCODER_REGISTER, ADDR_ENCODER_1)
             self._trigger_encoder()
         log("Registered and live view requested" + (" (Action series)" if self.liveview == "action" else ""))
+
+    def request_keyframe(self) -> None:
+        """Ask for the live view again: the camera answers with a fresh keyframe. Never in a loop: each
+        request restarts the encoder (see client/watchdog.py)."""
+        self.send(0x09, 0xA8, bytes((0, 4, 2, 0, 0, 0, 0, 0, 0, 0)))
 
     def _trigger_encoder(self) -> None:
         self.send(0x00, 0x81, APP_INFO_REPLY, ADDR_ENCODER_2, FLAG_WRITE)
@@ -263,7 +344,7 @@ class Datalink:
             time.sleep(ACK_INTERVAL)
 
     def _receive(self) -> None:
-        frames = _FrameAssembler(self._deliver_video)
+        frames = self.frames = _FrameAssembler(self._deliver_video)
         video_at = 0.0                        # perf_counter() of the last video packet
         self._sock.settimeout(FRAME_IDLE)
         while not self.stopped.is_set():
@@ -286,7 +367,7 @@ class Datalink:
                 video_at = now
                 self.stats["video_packets"] += 1
                 self.stats["video_bytes"] += len(packet) - VIDEO_HEADER_SIZE
-                frames.add(packet[FRAME_ID_OFFSET], packet[VIDEO_HEADER_SIZE:], now)
+                frames.add(seq, packet[GROUP_OFFSET], packet[VIDEO_HEADER_SIZE:], now)
                 continue
             if kind == Packet.LINK and len(packet) >= 34:
                 # Until video flows (or while it is stalled), acknowledge the video cursor the camera
@@ -314,7 +395,9 @@ class Datalink:
         self._sock.settimeout(0.25)
         try:
             self._handshake()
-            self._start_live_view()
+            if self.start_live_view:
+                self._start_live_view()
+            self.ready.set()
             threading.Thread(target=self._ack_loop, daemon=True, name="datalink-ack").start()
             if self.liveview == "action":
                 threading.Thread(target=self._heartbeat_loop, daemon=True, name="datalink-heartbeat").start()
@@ -332,4 +415,5 @@ class Datalink:
         kinds = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(self.kinds.items())) or "none"
         replies = ", ".join(f"{s:02x}/{i:02x} from {sender:02x}: {payload or '-'}"
                             for (s, i, sender), payload in list(self.replies.items())[:12]) or "none"
-        return f"camera packets: {kinds}; replies: {replies}"
+        short = f"; incomplete pictures: {self.frames.truncated}" if self.frames and self.frames.truncated else ""
+        return f"camera packets: {kinds}; replies: {replies}{short}"

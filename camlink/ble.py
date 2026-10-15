@@ -6,6 +6,9 @@ pairing request. The first time, the camera shows "OSMO" and the user approves i
 Once paired, the camera is woken and asked for the SSID and password of its own Wi-Fi access point.
 While the BLE link is up, a keepalive goes out every second and the camera's own requests are answered
 (left unanswered, it treats the link as lost).
+
+Instead of running its own access point, the camera can also join another Wi-Fi network (a router, or
+this computer's hotspot) as a station: see join_network(). Verified on an Osmo Nano with WPA2 networks.
 """
 
 from __future__ import annotations
@@ -29,6 +32,12 @@ KEEPALIVE = Message(ADDR_APP, ADDR_SESSION, 0x802B, FLAG_REQUEST, 0x00, 0x2B, b"
 CAMERA_WAKE = Message(ADDR_APP, ADDR_WAKE, 0x8053, FLAG_REQUEST, 0x53, 0x10, bytes(4))
 ASK_SSID = Message(ADDR_APP, ADDR_WIFI, 0x8007, FLAG_REQUEST, 0x07, 0x07)
 ASK_PASSWORD = Message(ADDR_APP, ADDR_WIFI, 0x800E, FLAG_REQUEST, 0x07, 0x0E)
+
+# Wi-Fi role (station mode). Role read: 00 00 = own access point, 00 01 = station; the Osmo Nano has no
+# role read (E0). Role set: [01] station, [00] back to its own access point.
+ROLE_GET, ROLE_SET, NETWORK_JOIN = 0x39, 0x48, 0x47
+JOINED = (b"\x00\x00", b"\x00\x00\x00")       # network join replies that mean success
+JOIN_RETRY = b"\x01\xff"                       # refused for now: seen first on WPA3 networks, retried
 
 PAIR_ALREADY = 0x01
 PAIR_NEEDS_APPROVAL = 0x02
@@ -89,6 +98,8 @@ class BleLink:
         self._logged: set[tuple[int, int, int]] = set()
         self._keepalive: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._waiting: dict[tuple[int, int], asyncio.Future] = {}   # replies awaited by request()
+        self._seq = 0x9000
 
     # ---- sending / receiving
     async def _send(self, message: Message) -> None:
@@ -107,6 +118,10 @@ class BleLink:
         key = (m.flags, m.cmd_set, m.cmd_id)
         first = key not in self._logged
         self._logged.add(key)
+        waiter = self._waiting.get(m.command) if m.is_reply else None
+        if waiter is not None:
+            payload = bytes(m.payload)
+            self._loop.call_soon_threadsafe(lambda: waiter.done() or waiter.set_result(payload))
         if m.needs_reply:
             # The camera asks things too (who are you, approval results...) and drops the link when they
             # go unanswered: echo the payload back, or our app record for "who are you".
@@ -250,6 +265,56 @@ class BleLink:
                 await self._send(pairing_message())
                 log("No answer to the pairing request yet, sent it again")
             await asyncio.sleep(0.1)
+
+    async def request(self, cmd_set: int, cmd_id: int, payload: bytes = b"", receiver: int = ADDR_WIFI,
+                      timeout: float = 5.0) -> bytes | None:
+        """Send a request over BLE and wait for its reply payload (None when none comes in time)."""
+        self._seq = self._seq % 0xFFFF + 1
+        waiter = self._loop.create_future()
+        self._waiting[(cmd_set, cmd_id)] = waiter
+        try:
+            await self._send(Message(ADDR_APP, receiver, self._seq, FLAG_REQUEST, cmd_set, cmd_id, payload))
+            return await asyncio.wait_for(waiter, timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._waiting.pop((cmd_set, cmd_id), None)
+
+    async def join_network(self, ssid: str, password: str) -> bool:
+        """Have the camera leave its own access point and join `ssid` as a station. True when it confirmed
+        the join; False when no reply came (it may have joined anyway: look for it on the network). Raises
+        when it refused. WPA3-only networks are refused by the Osmo Nano; WPA2 (or WPA2/WPA3) works."""
+        raw_ssid, raw_password = ssid.encode("utf-8"), password.encode("utf-8")
+        if not raw_ssid or len(raw_ssid) > 32 or len(raw_password) > 63:
+            raise ValueError("network name up to 32 bytes and password up to 63")
+        role = await self.request(0x07, ROLE_GET, b"\x00")
+        if role != b"\x00\x01":                           # not a station yet
+            reply = await self.request(0x07, ROLE_SET, b"\x01")
+            if reply not in (b"\x00", b"\x00\x00"):
+                raise RuntimeError("The camera did not switch to joining other networks"
+                                   + (f" (it answered {reply.hex()})" if reply else ""))
+            log("Camera switched to station mode; joining the network in 10 s")
+            await asyncio.sleep(10)                      # the camera needs a moment before it can join
+        payload = bytes((len(raw_ssid),)) + raw_ssid + bytes((len(raw_password),)) + raw_password
+        for attempt in range(1, 4):
+            reply = await self.request(0x07, NETWORK_JOIN, payload, timeout=45)
+            if reply in JOINED:
+                log(f"Camera joined {ssid}")
+                return True
+            if reply is None:
+                log("No answer to the network join; looking for the camera on the network")
+                return False
+            if reply == JOIN_RETRY and attempt < 3:
+                await asyncio.sleep(5)
+                continue
+            raise RuntimeError(f"The camera could not join “{ssid}”. Check the password; networks that only "
+                               "allow WPA3 are refused (use WPA2 or WPA2/WPA3)")
+        return False
+
+    async def use_own_wifi(self) -> bool:
+        """Back to the camera's own access point (after join_network)."""
+        reply = await self.request(0x07, ROLE_SET, b"\x00")
+        return reply in (b"\x00", b"\x00\x00")
 
     async def close(self) -> None:
         if self._keepalive:

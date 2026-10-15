@@ -39,6 +39,10 @@ endorsed by or sponsored by DJI. OBS Studio is a project of the OBS Project.
 - **osmo_nano_webcam** by Matis-ard — <https://github.com/Matis-ard/osmo_nano_webcam> — showed how
   the Osmo Nano's live view can be received over Wi-Fi. No code from it is included here.
 
+- **OpenPocketCine** by Erik Sutton and contributors — <https://github.com/erik-sutton95/OpenPocketCine>
+  — Apache License 2.0 (Copyright 2026 Erik Sutton and OpenPocketCine contributors). The live view's
+  picture header and private SEI follow that project's documentation. No code from it is included here.
+
 ## Dependencies
 
 Installed with pip from `requirements.txt` the first time the app runs; none of them are included in

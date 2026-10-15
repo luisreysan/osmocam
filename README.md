@@ -10,7 +10,10 @@ without opening a video-call app.
 
 > Unofficial and independent: not affiliated with, endorsed or sponsored by DJI. See [Legal](#legal).
 
-> **New in 1.1: macOS and Linux.** On macOS, the connection and the live view are tested with the Osmo
+> **New in 1.1.5:** a steadier picture. A large frame from the camera is no longer cut in two (that broke
+> the picture until the next keyframe).
+>
+> **Since 1.1: macOS and Linux.** On macOS, the connection and the live view are tested with the Osmo
 > Nano (about 13 ms median latency); the OBS Virtual Camera on macOS, and Linux, are still being tested
 > on real hardware. Reports are welcome.
 
