@@ -13,17 +13,17 @@ DJI_COMPANY_ID = 0x08AA
 MODELS = {
     0x0010: "Osmo Action 2", 0x0012: "Osmo Action 3", 0x0014: "Osmo Action 4", 0x0015: "Osmo Action 5 Pro",
     0x0017: "Osmo 360", 0x0018: "Osmo Action 6", 0x0019: "Osmo Nano", 0x0020: "Osmo Pocket 3",
-    0x0021: "Osmo Pocket 4", 0x0022: "Osmo Pocket 4 Pro",
+    0x0021: "Osmo Pocket 4", 0x0022: "Osmo Pocket 4P",
 }
 TESTED_MODELS = {0x0019}
 NANO = 0x0019
-POCKETS = {0x0020, 0x0021, 0x0022}     # gimbal and zoom; Pocket 4 / 4 Pro stream H.265
+POCKETS = {0x0020, 0x0021, 0x0022}     # gimbal and zoom; Pocket 4 / 4P stream H.265
 UNSUPPORTED_MODELS = {0x0017: "Osmo 360 (WPA3 Wi-Fi and 360° video: not supported)"}
 # Newer adverts carry a product type that refines the model id.
 PRODUCT_TYPES = {218: 0x0022}
 NAME_PREFIXES = ("osmo", "xtra")
 # Adverts without manufacturer data (scan responses): guess the model from the name, most specific first.
-NAME_HINTS = (("pocket4pro", 0x0022), ("pocket4p", 0x0022), ("pocket4", 0x0021), ("pocket3", 0x0020), ("action6", 0x0018),
+NAME_HINTS = (("pocket4p", 0x0022), ("pocket4", 0x0021), ("pocket3", 0x0020), ("action6", 0x0018),
               ("action5", 0x0015), ("action4", 0x0014), ("action3", 0x0012), ("action2", 0x0010),
               ("osmo360", 0x0017), ("nano", 0x0019), ("atto", 0x0019), ("edgepro", 0x0015),
               ("edge", 0x0014), ("muse", 0x0020))
@@ -67,7 +67,7 @@ def decode_advert(name: str, manufacturer_data: dict[int, bytes]) -> dict | None
 
 def liveview_mode(model_id: int | None) -> str:
     """How the datalink starts the live view: "nano" (verified on the Osmo Nano), "pocket" for the Osmo
-    Pocket 3 / 4 / 4 Pro, or "action" for every other model: the Nano's commands plus the Action series'
+    Pocket 3 / 4 / 4P, or "action" for every other model: the Nano's commands plus the Action series'
     (see camlink.datalink)."""
     if model_id == NANO:
         return "nano"

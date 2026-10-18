@@ -10,8 +10,8 @@ without opening a video-call app.
 
 > Unofficial and independent: not affiliated with, endorsed or sponsored by DJI. See [Legal](#legal).
 
-> **New in 1.2 (experimental): Osmo Pocket 3, 4 and 4 Pro** as a webcam, including the H.265 live view of
-> the Pocket 4 and 4 Pro. **Not tested with a real Pocket yet**: reports are welcome.
+> **New in 1.2 (experimental): Osmo Pocket 3, 4 and 4P** as a webcam, including the H.265 live view of
+> the Pocket 4 and 4P. **Not tested with a real Pocket yet**: reports are welcome.
 >
 > **Since 1.1.5:** a steadier picture. A large frame from the camera is no longer cut in two (that broke
 > the picture until the next keyframe).
@@ -24,7 +24,7 @@ without opening a video-call app.
 - Low latency: about 12 ms (median) from the first packet of a frame to the virtual camera, plus the
   camera's own capture and Wi-Fi delay.
 - Reconnects by itself if the video stops; puts your Wi-Fi back when it exits.
-- Osmo Pocket 3, 4 and 4 Pro: supported experimentally (not tested with a real one yet). Other DJI Osmo
+- Osmo Pocket 3, 4 and 4P: supported experimentally (not tested with a real one yet). Other DJI Osmo
   cameras (Action 4/5 Pro/6) use the same protocol and may work, fully or in part. Only the Osmo Nano has
   been tested. The Osmo 360 is not supported.
 

@@ -686,9 +686,9 @@ Osmo Nano has been tested with these apps.
 | `0x0019` | Osmo Nano | tested |
 | `0x0020` | Osmo Pocket 3 | H.264 live view; gimbal, zoom (12.1) |
 | `0x0021` | Osmo Pocket 4 | H.265 live view; gimbal, zoom (12.1) |
-| `0x0022` | Osmo Pocket 4 Pro | H.265 live view; gimbal, zoom (12.1); BLE name `OsmoPocket4P-…` |
+| `0x0022` | Osmo Pocket 4P | H.265 live view; gimbal, zoom (12.1); BLE name `OsmoPocket4P-…` |
 
-### 12.1 Osmo Pocket 3 / 4 / 4 Pro
+### 12.1 Osmo Pocket 3 / 4 / 4P
 
 Follows the OpenPocketCine project's notes, which verified these on the cameras; not exercised with
 Osmo Client yet.
@@ -705,11 +705,11 @@ Osmo Client yet.
 A pairing reply `00 06` means "try again in a moment". On 5.8 GHz the access point can take about a
 minute to appear.
 
-**Live view:** the Pocket 3 sends H.264; the Pocket 4 and 4 Pro send **H.265** (1280×720, ~25 fps) in the
+**Live view:** the Pocket 3 sends H.264; the Pocket 4 and 4P send **H.265** (1280×720, ~25 fps) in the
 same picture header. Tell them apart by the parameter sets of the first keyframe: H.265 VPS/SPS/PPS start
 `40 01` / `42 01` / `44 01`, H.264 SPS/PPS `67` / `68` (an H.265 `28 01` keyframe is not an H.264 PPS).
 
-**Photo mode** is `0x17` on the Pocket 4 / 4 Pro (`0x05` on the Pocket 3 and the Nano).
+**Photo mode** is `0x17` on the Pocket 4 / 4P (`0x05` on the Pocket 3 and the Nano).
 
 **Gimbal**, command set `0x04` → `0x04` (flags `0x40`, acknowledged `00`):
 
@@ -730,5 +730,5 @@ Past ±165° of pan (turned 180°) left and right swap. The attitude comes as `0
 **Zoom**, `02/B8` → `0x01`: `0A 4E <lens u16>` goes to a factor (lens = 217 × factor: 1× 217, 3× 651,
 12× 2604); `01 <rate 48-4E> <01 in, 00 out> 00` while held, `FF 00 00 00` to stop. Read back from the
 `cam_lens_state` topic (u16 at 14). Stops: Pocket 3 and 4 1×/2×/4× (Pocket 3: up to 2× at 4K, 3× at 2.7K,
-4× at 1080p), Pocket 4 Pro 1×/3×/6×/12×; Slow-mo, Timelapse and Super Night stay at 1× (4 Pro: 1×/3×).
-The Pocket 4 Pro refuses to zoom in D-Log2.
+4× at 1080p), Pocket 4P 1×/3×/6×/12×; Slow-mo, Timelapse and Super Night stay at 1× (4P: 1×/3×).
+The Pocket 4P refuses to zoom in D-Log2.

@@ -1,5 +1,5 @@
 """Live view decoding (PyAV / FFmpeg), on its own thread: H.264 (Osmo Nano, Pocket 3, Action series) or
-H.265 (Pocket 4 and 4 Pro), picked from the parameter sets of the stream's keyframes."""
+H.265 (Pocket 4 and 4P), picked from the parameter sets of the stream's keyframes."""
 
 from __future__ import annotations
 
