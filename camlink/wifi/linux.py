@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 
 from ..util import log
+from .errors import JoinByHand
 
 NO_NMCLI = ("NetworkManager (nmcli) was not found: join the camera's Wi-Fi network by hand (its name and "
             "password are in cameras.json, see the README)")
@@ -54,7 +55,7 @@ def adapter_name(interface: str | None = None) -> str:
         devices = [row[0] for row in _rows("-f", "DEVICE,TYPE", "device", "status")
                    if len(row) >= 2 and row[1] == "wifi"]
     except FileNotFoundError:
-        raise RuntimeError(NO_NMCLI) from None
+        raise JoinByHand(NO_NMCLI) from None
     if interface:
         return interface if interface in devices else ""
     return devices[0] if devices else ""

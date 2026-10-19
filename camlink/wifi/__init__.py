@@ -13,13 +13,7 @@ import time
 
 from ..protocol import CAMERA_HOST, CAMERA_SUBNET
 from ..util import log
-
-class WifiError(RuntimeError):
-    """Joining the camera's network failed; the message says why and what to do."""
-
-
-class NoWifi(WifiError):
-    """This computer has no Wi-Fi adapter it can use: trying again won't help."""
+from .errors import JoinByHand, NoWifi, WifiError  # noqa: F401 - part of this package's interface
 
 
 if sys.platform == "win32":
@@ -73,6 +67,8 @@ def join(ssid: str, password: str, timeout: float = 45, interface: str | None = 
     try:
         try:
             name = adapter_name(interface)
+        except WifiError:                         # JoinByHand: Linux without NetworkManager
+            raise
         except RuntimeError as error:             # the system's Wi-Fi can't be used at all (no service...)
             raise NoWifi(str(error)) from error
         if not name:
