@@ -39,6 +39,11 @@ ROLE_GET, ROLE_SET, NETWORK_JOIN = 0x39, 0x48, 0x47
 JOINED = (b"\x00\x00", b"\x00\x00\x00")       # network join replies that mean success
 JOIN_RETRY = b"\x01\xff"                       # refused for now: seen first on WPA3 networks, retried
 
+
+class JoinRefused(RuntimeError):
+    """The camera could not join the network it was given (password, WPA3 only, out of its reach): asking
+    again won't help until the network or its password changes."""
+
 PAIR_ALREADY = 0x01
 PAIR_NEEDS_APPROVAL = 0x02
 PAIR_LATER = 0x06               # busy (seen on the Osmo Pocket): try again in a few seconds
@@ -283,10 +288,13 @@ class BleLink:
         finally:
             self._waiting.pop((cmd_set, cmd_id), None)
 
-    async def join_network(self, ssid: str, password: str) -> bool:
+    async def join_network(self, ssid: str, password: str,
+                           progress: Callable[[str], None] | None = None) -> bool:
         """Have the camera leave its own access point and join `ssid` as a station. True when it confirmed
         the join; False when no reply came (it may have joined anyway: look for it on the network). Raises
-        when it refused. WPA3-only networks are refused by the Osmo Nano; WPA2 (or WPA2/WPA3) works."""
+        when it refused. WPA3-only networks are refused by the Osmo Nano; WPA2 (or WPA2/WPA3) works.
+        `progress(text)` hears each step (an attempt can take the camera half a minute)."""
+        say = progress or (lambda _text: None)
         raw_ssid, raw_password = ssid.encode("utf-8"), password.encode("utf-8")
         if not raw_ssid or len(raw_ssid) > 32 or len(raw_password) > 63:
             raise ValueError("network name up to 32 bytes and password up to 63")
@@ -297,9 +305,13 @@ class BleLink:
                 raise RuntimeError("The camera did not switch to joining other networks"
                                    + (f" (it answered {reply.hex()})" if reply else ""))
             log("Camera switched to station mode; joining the network in 10 s")
+            say("Getting the camera ready (10 s)")
             await asyncio.sleep(10)                      # the camera needs a moment before it can join
         payload = bytes((len(raw_ssid),)) + raw_ssid + bytes((len(raw_password),)) + raw_password
+        failed = ""
         for attempt in range(1, 4):
+            say(f"Attempt {attempt} of 3"
+                + (f" (the last one failed: the camera answered {failed})" if failed else ""))
             reply = await self.request(0x07, NETWORK_JOIN, payload, timeout=45)
             if reply in JOINED:
                 log(f"Camera joined {ssid}")
@@ -307,11 +319,15 @@ class BleLink:
             if reply is None:
                 log("No answer to the network join; looking for the camera on the network")
                 return False
+            log(f"The camera did not join {ssid} (it answered {reply.hex() or 'nothing'}, attempt {attempt} of 3)")
+            failed = reply.hex() or "nothing"
             if reply == JOIN_RETRY and attempt < 3:
+                say(f"Attempt {attempt} of 3 failed (the camera answered {failed}); trying again in 5 s")
                 await asyncio.sleep(5)
                 continue
-            raise RuntimeError(f"The camera could not join “{ssid}”. Check the password; networks that only "
-                               "allow WPA3 are refused (use WPA2 or WPA2/WPA3)")
+            raise JoinRefused(f"The camera could not join “{ssid}”. Check the password; networks that only "
+                              "allow WPA3 are refused (use WPA2 or WPA2/WPA3), and a 5 GHz network may be out "
+                              "of the camera's reach (try the router's 2.4 GHz network)")
         return False
 
     async def use_own_wifi(self) -> bool:
