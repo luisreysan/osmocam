@@ -678,8 +678,14 @@ next listing.
 **Osmo Pocket 3.** It answers the media mode request with `E0`, yet lists its newest page (45 files)
 all the same; older pages need the media mode (OpenPocketCine's notes), so for now only the newest files
 are listed. It has one microSD card and no internal memory: download everything with `storage=0`, even
-when a handle has bit 30 set. Its records may carry other bytes than `FF` / `FE` before the `19 06` tag
-and another type byte for photos (tell them by the extension). Thumbnails: `.THM`, else `.SCR`.
+when a handle has bit 30 set (it answers `D6` for the internal-memory cursor). Its records put the file
+name at the end, after the path TLVs (the Nano puts it before them): a path belongs to the file whose name
+it ends with. They may carry other bytes than `FF` / `FE` before the `19 06` tag and another type byte for
+photos (tell them by the extension). Thumbnails: `.THM` is only 90×90 (about 1 KB); `.SCR` is a
+720-pixel JPEG (about 350 KB), which Osmo Client shrinks to 512 pixels for the gallery. On a shared network
+(4.1) it
+lists its files but refuses connections to its file server: thumbnails and downloads need its own access
+point.
 
 ## 10. Power and sleep
 
