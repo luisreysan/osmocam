@@ -18,6 +18,8 @@ MODELS = {
 TESTED_MODELS = {0x0019}
 NANO = 0x0019
 POCKETS = {0x0020, 0x0021, 0x0022}     # gimbal and zoom; Pocket 4 / 4P stream H.265
+# One microSD card and no internal memory: every file downloads from storage 0, whatever its handle says.
+SD_ONLY = {0x0020}
 UNSUPPORTED_MODELS = {0x0017: "Osmo 360 (WPA3 Wi-Fi and 360° video: not supported)"}
 # Newer adverts carry a product type that refines the model id.
 PRODUCT_TYPES = {218: 0x0022}

@@ -2,7 +2,9 @@
 
 Joining turns Wi-Fi on if it is off (Native Wifi API), adds a WPA2 profile for the camera's network and
 connects with netsh. Going back uses the Native Wifi API (wlanapi.dll) directly: netsh refuses to connect
-to a saved network unless Windows location access is enabled, WlanConnect does not.
+to a saved network unless Windows location access is enabled, WlanConnect does not. Without location access
+Windows won't say which network the adapter is on either; its network list (Get-NetConnectionProfile)
+still names it.
 """
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ _BSS_INFRASTRUCTURE = 1
 _OPCODE_RADIO_STATE = 4
 _OPCODE_CURRENT_CONNECTION = 7
 _STATE_CONNECTED = 1
+_ACCESS_DENIED = 5                     # WlanQueryInterface without location access (Windows 11)
 _RADIO_ON = 1
 _RADIO_OFF = 2
 # netsh's code for "the wireless LAN interface is powered down" (Wi-Fi off, or airplane mode)
@@ -104,13 +107,14 @@ class _Wlan:
         finally:
             self.api.WlanFreeMemory(pointer)
 
-    def current_profile(self, guid: _GUID) -> str:
+    def current_profile(self, guid: _GUID) -> str | None:
+        """The connected network's profile name, "" when not connected, None when Windows won't say."""
         size = wintypes.DWORD()
         pointer = ctypes.c_void_p()
         code = self.api.WlanQueryInterface(self.handle, ctypes.byref(guid), _OPCODE_CURRENT_CONNECTION, None,
                                            ctypes.byref(size), ctypes.byref(pointer), None)
         if code:
-            return ""                       # not connected
+            return None if code == _ACCESS_DENIED else ""     # else: not connected
         try:
             state = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint))[0]
             name = ctypes.wstring_at(pointer.value + 8)
@@ -189,9 +193,26 @@ def current_network(interface: str | None = None) -> str:
         if not found:
             return ""
         with _Wlan() as wlan:
-            return wlan.current_profile(found[0])
+            name = wlan.current_profile(found[0])
     except OSError:
         return ""
+    return _listed_network(found[1]) if name is None else name
+
+
+def _listed_network(alias: str) -> str:
+    """Name of the network the adapter `alias` is connected to, from Windows' network list."""
+    script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-NetConnectionProfile | "
+              "ForEach-Object { $_.InterfaceAlias + [char]9 + $_.Name }")
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                capture_output=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        interface, _, name = line.strip().partition("	")
+        if interface.lower() == alias.lower():
+            return name
+    return ""
 
 
 def _decode(raw: bytes) -> str:

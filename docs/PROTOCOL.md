@@ -145,7 +145,9 @@ While connected over BLE the camera may push named status topics as `00/99` fram
 - While the computer's Wi-Fi adapter is on the camera's network it has no internet through that adapter.
   Keeping Ethernet (or a second adapter) connected keeps internet working.
 - Every Osmo camera uses the same address, so files listed on one camera must not be requested from
-  another.
+  another. An address in `192.168.2.0/24` doesn't tell which camera's network the computer is on: switching
+  cameras, compare the network's name. (Windows 11 only gives the Wi-Fi network's name to programs with
+  location access; its network list, `Get-NetConnectionProfile`, names it without.)
 
 ### 4.1 Joining another network (station mode)
 
@@ -406,10 +408,12 @@ Changing the format restarts the camera's encoder: the live view stops for 2-5 s
 | `67` | 4K 4:3 |
 | `5F` | 2.7K 4:3 |
 | `0C` | 1080p 4:3 |
+| `69` / `6A` / `6B` | 1080p / 2160p / 3K 1:1 (Osmo Pocket 3) |
+| `42` / `43` / `6C` | 1080p / 2.7K / 3K 9:16 (Osmo Pocket 3, after the camera's own portrait lock) |
 
-| fps code | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-|---|---|---|---|---|---|---|---|---|
-| fps | 24 | 25 | 30 | 48 | 50 | 60 | 120 | 240 |
+| fps code | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | `0A` |
+|---|---|---|---|---|---|---|---|---|---|
+| fps | 24 | 25 | 30 | 48 | 50 | 60 | 120 | 240 | 100 |
 
 What each capture mode offers on the Nano (the camera publishes it as `camcap_video_format`, 8.4):
 
@@ -431,10 +435,26 @@ get: 00 01 <type u16>
 Sending a 16:9 resolution switches the picture back to 16:9 but leaves the aspect setting at 4:3, so
 set it to 2 explicitly in Video mode.
 
+**Osmo Pocket 3.** It publishes no `camcap_video_format` (it answers `01`: no such topic), and the aspect
+is part of the resolution code (no `02/8E` aspect write). Its choices, from the OpenPocketCine project's
+survey of the camera:
+
+| mode | resolutions | fps |
+|---|---|---|
+| Video | 4K, 2.7K, 1080p 16:9; 3K, 2160p, 1080p 1:1 | 24-60 |
+| Low-Light (`28`) | 4K, 1080p | 24, 25, 30 |
+| Timelapse, Hyperlapse | 4K, 2.7K, 1080p | 25, 30 |
+| Slow-mo | 4K 100 and 120 fps, 2.7K 120 fps, 1080p 120 fps (4×); 1080p 240 fps (8×) | |
+
+In Slow-mo the Pocket 3 takes the factor in byte 3: `02/18 [res, fps, 00, factor, 00]` (4K 100 fps:
+`10 0A 00 04 00`), where the Nano takes it in byte 4. Colour profile `02/42`: `00` Normal, `3C` HLG,
+`3D` D-Log M.
+
 ### 7.3 Photo format
 
 `02/12 [size, ratio]`, read with `02/13` (photo mode only). Size `04` = L, `03` = M; ratio `00` = 4:3,
-`01` = 16:9. L 4:3 = 36 MP, L 16:9 = 31 MP, M 4:3 = 9 MP, M 16:9 = 8 MP.
+`01` = 16:9. L 4:3 = 36 MP, L 16:9 = 31 MP, M 4:3 = 9 MP, M 16:9 = 8 MP. Osmo Pocket 3 (and 4 / 4P):
+`00 01` = 16:9, `00 03` = 1:1.
 
 ### 7.4 White balance
 
@@ -655,6 +675,12 @@ Items 6 and 7 follow the OpenPocketCine project's notes (the delete layout is th
 Both verified on an Osmo Nano: the favourite mark shows on the camera, and a deleted file is gone from the
 next listing.
 
+**Osmo Pocket 3.** It answers the media mode request with `E0`, yet lists its newest page (45 files)
+all the same; older pages need the media mode (OpenPocketCine's notes), so for now only the newest files
+are listed. It has one microSD card and no internal memory: download everything with `storage=0`, even
+when a handle has bit 30 set. Its records may carry other bytes than `FF` / `FE` before the `19 06` tag
+and another type byte for photos (tell them by the extension). Thumbnails: `.THM`, else `.SCR`.
+
 ## 10. Power and sleep
 
 - **Wake**: the normal BLE connection (section 3.3) wakes a sleeping camera; it keeps advertising while
@@ -672,8 +698,8 @@ next listing.
 
 ## 12. Models
 
-Model ids in the BLE advertisement (from [osmosis](https://github.com/KonradIT/osmosis)). Only the
-Osmo Nano has been tested with these apps.
+Model ids in the BLE advertisement (from [osmosis](https://github.com/KonradIT/osmosis)). The Osmo Nano
+is tested with both apps; the Osmo Pocket 3 has been used with Osmo Client.
 
 | id | model | notes |
 |---|---|---|
@@ -684,14 +710,14 @@ Osmo Nano has been tested with these apps.
 | `0x0017` | Osmo 360 | WPA3 Wi-Fi and 360° video: not supported |
 | `0x0018` | Osmo Action 6 | |
 | `0x0019` | Osmo Nano | tested |
-| `0x0020` | Osmo Pocket 3 | H.264 live view; gimbal, zoom (12.1) |
+| `0x0020` | Osmo Pocket 3 | used with a real camera: H.264 live view; gimbal, zoom, formats (7.2), gallery (9) |
 | `0x0021` | Osmo Pocket 4 | H.265 live view; gimbal, zoom (12.1) |
 | `0x0022` | Osmo Pocket 4P | H.265 live view; gimbal, zoom (12.1); BLE name `OsmoPocket4P-…` |
 
 ### 12.1 Osmo Pocket 3 / 4 / 4P
 
-Follows the OpenPocketCine project's notes, which verified these on the cameras; not exercised with
-Osmo Client yet.
+Follows the OpenPocketCine project's notes, which verified these on the cameras. Used with a real Osmo
+Pocket 3 since Osmo Client 1.6; the Pocket 4 and 4P are not exercised with it yet.
 
 **Session** (same handshake, poke, picture header and acknowledgements as the Nano):
 
