@@ -741,7 +741,10 @@ minute to appear.
 same picture header. Tell them apart by the parameter sets of the first keyframe: H.265 VPS/SPS/PPS start
 `40 01` / `42 01` / `44 01`, H.264 SPS/PPS `67` / `68` (an H.265 `28 01` keyframe is not an H.264 PPS).
 
-**Photo mode** is `0x17` on the Pocket 4 / 4P (`0x05` on the Pocket 3 and the Nano).
+**Photo mode** is `0x17` on the Pocket 4 / 4P (`0x05` on the Pocket 3 and the Nano). A **timelapse**
+starts and stops with record (`02/02`) on the Pocket 4 / 4P, with take-photo (`02/01`) on the Pocket 3 and
+the Nano. **Slow-mo** formats carry the speed factor in byte 3 on every Pocket (7.2); the Pocket 4P adds
+4K 200 fps (fps code `13`, factor 4) and 240 fps (factor 8), and publishes its own `camcap_video_format`.
 
 **Gimbal**, command set `0x04` → `0x04` (flags `0x40`, acknowledged `00`):
 
