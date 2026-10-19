@@ -69,6 +69,11 @@ POWERED_DOWN = "0x80342002"
 RADIO_OFF = ("Wi-Fi is turned off on this computer: turn it on (the Wi-Fi button in the quick settings, with "
              "airplane mode off) and try again")
 RADIO_SWITCH = "Wi-Fi is switched off with a hardware switch or key on this computer: switch it on and try again"
+# WlanOpenHandle's answer when the WLAN AutoConfig service isn't running: Windows only runs it on a computer
+# with a Wi-Fi adapter (a desktop on Ethernet has none), unless someone disabled it
+SERVICE_NOT_ACTIVE = 1062
+NO_WIFI_SERVICE = ("This computer has no Wi-Fi: Windows' Wi-Fi service (WLAN AutoConfig) is not running, so "
+                   "there is no Wi-Fi adapter or it is disabled")
 
 
 class _Wlan:
@@ -166,8 +171,14 @@ def _adapter(interface: str | None) -> tuple[_GUID, str] | None:
 
 
 def adapter_name(interface: str | None = None) -> str:
-    """Name of the Wi-Fi adapter in use ("" when the computer has none)."""
-    found = _adapter(interface)
+    """Name of the Wi-Fi adapter in use ("" when the computer has none). Raises when Windows' Wi-Fi
+    service can't be used at all."""
+    try:
+        found = _adapter(interface)
+    except OSError as error:
+        if error.errno == SERVICE_NOT_ACTIVE:
+            raise RuntimeError(NO_WIFI_SERVICE) from None
+        raise RuntimeError(f"Windows' Wi-Fi service is unavailable on this computer ({error})") from None
     return found[1] if found else ""
 
 

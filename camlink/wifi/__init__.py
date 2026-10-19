@@ -18,6 +18,10 @@ class WifiError(RuntimeError):
     """Joining the camera's network failed; the message says why and what to do."""
 
 
+class NoWifi(WifiError):
+    """This computer has no Wi-Fi adapter it can use: trying again won't help."""
+
+
 if sys.platform == "win32":
     from . import windows as _system
 elif sys.platform == "darwin":
@@ -67,9 +71,12 @@ def join(ssid: str, password: str, timeout: float = 45, interface: str | None = 
         log(f"Already on the camera network ({ip})")
         return ip
     try:
-        name = adapter_name(interface)
+        try:
+            name = adapter_name(interface)
+        except RuntimeError as error:             # the system's Wi-Fi can't be used at all (no service...)
+            raise NoWifi(str(error)) from error
         if not name:
-            raise WifiError("No Wi-Fi adapter found" + (f" named {interface!r}" if interface else ""))
+            raise NoWifi("No Wi-Fi adapter found" + (f" named {interface!r}" if interface else ""))
         _system.prepare(ssid, password, name)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
