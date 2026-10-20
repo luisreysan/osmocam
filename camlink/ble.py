@@ -298,9 +298,10 @@ class BleLink:
         raw_ssid, raw_password = ssid.encode("utf-8"), password.encode("utf-8")
         if not raw_ssid or len(raw_ssid) > 32 or len(raw_password) > 63:
             raise ValueError("network name up to 32 bytes and password up to 63")
-        role = await self.request(0x07, ROLE_GET, b"\x00")
+        # both can take the camera 5-6 s to answer (seen on the Osmo Pocket 3 and the Nano)
+        role = await self.request(0x07, ROLE_GET, b"\x00", timeout=10)
         if role != b"\x00\x01":                           # not a station yet
-            reply = await self.request(0x07, ROLE_SET, b"\x01")
+            reply = await self.request(0x07, ROLE_SET, b"\x01", timeout=15)
             if reply not in (b"\x00", b"\x00\x00"):
                 raise RuntimeError("The camera did not switch to joining other networks"
                                    + (f" (it answered {reply.hex()})" if reply else ""))

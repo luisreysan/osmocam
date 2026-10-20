@@ -18,6 +18,7 @@ See docs/PROTOCOL.md for the details.
 
 from __future__ import annotations
 
+import os
 import random
 import socket
 import struct
@@ -27,9 +28,10 @@ from collections import Counter
 from collections.abc import Callable
 from enum import IntEnum
 from functools import reduce
+from pathlib import Path
 
 from .duml import FLAG_REPLY, FLAG_REQUEST, Message, parse_all
-from .nal import CODEC_NAMES, parameter_sets
+from .nal import CODEC_NAMES, H264, parameter_sets, picture_kind
 from .protocol import (ADDR_APP, ADDR_CAMERA, ADDR_ENCODER_1, ADDR_ENCODER_2, ADDR_GIMBAL_APP, ADDR_LIVEVIEW,
                        ADDR_LIVEVIEW_POCKET, ADDR_TOPICS,
                        APP_INFO_REPLY, CAMERA_HOST, DATALINK_PORT, ENCODER_REGISTER, POKE_PORT,
@@ -61,11 +63,30 @@ FLAG_WRITE = 0x80               # what the encoder's registration and trigger ar
 # second. The first command sequence follows the camera's first 34-byte status packet (u16 at 8, + 8).
 PRESENCE_INTERVAL = 1.0
 TELEMETRY_WAIT = 2.0
+# Osmo Pocket 3: it sends a keyframe only when its stream starts, and the stream keeps running between
+# sessions (there is no command that stops it, and 0x09/0xA8 brings no keyframe while it runs). Its pictures
+# refresh themselves gradually instead (parameter sets every 1.5 s): a lost packet heals within ~1.5 s, and a
+# session that joins the running stream can start at its parameter sets; that picture builds up over a few
+# seconds. So a Pocket session takes the first picture with parameter sets when no keyframe comes.
+POCKET_JOIN_WAIT = 1.0          # video without a keyframe this long: join the running stream
+# A keyframe arrives as a burst of packets: a larger receive buffer keeps it whole while the app is busy.
+RECEIVE_BUFFER = 2 << 20
+# Data packets (the client's commands) form a chain: each names the one before it, and the camera drops
+# everything after one it never got. Its link packets acknowledge the last one it took (u16 at 26), so a
+# packet still unacknowledged after RESEND_AFTER is sent again, with the ones after it, in order. Without
+# this one lost packet silenced every later command (an Osmo Pocket then stops its video: no presence).
+RESEND_AFTER = 0.3
+RESEND_GIVE_UP = 5.0            # the camera takes none of them for this long: leave it to the watchdog
+UNACKED_MAX = 256
 
 # Handshake: the client's base sequence, then one parameter block per channel (the values the camera
 # accepts; the meaning of each field is not documented), then a fixed tail.
 _CHANNEL_PARAMS = ((100, 100), (256, 400), (20, 100))
 _HANDSHAKE_TAIL = bytes((1, 1, 4, 1, 2))
+# Diagnostics: with OSMO_VIDEO_DUMP set to a folder, each session writes every packet it receives and every
+# packet it sends there (records: f64 perf_counter, u8 0 received / 1 sent, u16 length, the packet).
+DUMP_DIR = os.environ.get("OSMO_VIDEO_DUMP")
+_DUMP_RECORD = struct.Struct("<dBH")
 
 
 class Packet(IntEnum):
@@ -127,10 +148,18 @@ class _FrameAssembler:
     so the group number must not split pictures. A gap in the packet sequence means a lost packet: the part
     that arrived is handed on and the decoder conceals the rest. Cameras that send no picture header are
     split on the group number and after a short silence instead. Nothing is handed on before the first
-    parameter sets (H.264 SPS or H.265 VPS), so the decoder always starts on a keyframe."""
+    keyframe (an H.264 IDR or I picture, an H.265 random-access picture) with its parameter sets: an Osmo
+    Pocket repeats its parameter sets alone every 1.5 s, but sends a keyframe only when its live view starts,
+    so parameter sets don't mean a picture can be decoded. Parameter sets that come alone ride with the
+    next picture.
 
-    def __init__(self, deliver: Callable[[bytes, float], None]) -> None:
+    `join`: a camera that refreshes its pictures gradually (Osmo Pocket 3) may also be joined at its
+    parameter sets after POCKET_JOIN_WAIT without a keyframe; the decoder then shows the picture while it
+    builds up."""
+
+    def __init__(self, deliver: Callable[[bytes, float], None], join: bool = False) -> None:
         self._deliver = deliver
+        self._join = join
         self._data = bytearray()
         self._need = 0                        # bytes still missing from the current picture
         self._headers = False                 # this camera sends picture headers
@@ -142,6 +171,12 @@ class _FrameAssembler:
         self._synced = False
         self._dropping = False                # dropping the rest of a picture whose first packet was lost
         self.truncated = 0                    # pictures broken by lost packets (cut short, or dropped)
+        self._params: bytes | None = None     # parameter sets that came alone, for the next picture
+        self.codec = H264                     # from the first parameter sets
+        self.keyframes = 0                    # keyframes received
+        self._video_since: float | None = None   # monotonic() of the first video packet
+        self.pictures: Counter = Counter()    # pictures by kind (nal.picture_kind), for the diagnostics
+        self.timeline: list[str] = []         # kind and size of the first pictures
 
     def _lost(self) -> None:
         self.truncated += 1
@@ -149,6 +184,8 @@ class _FrameAssembler:
             log("Live view: a picture arrived incomplete (lost packets)")
 
     def add(self, seq: int, group: int, data: bytes, now: float) -> None:
+        if self._video_since is None:
+            self._video_since = time.monotonic()
         lost = self._next_seq is not None and seq != self._next_seq
         self._next_seq = (seq + SEQ_STEP) & 0xFFFF
         if data[:4] == PICTURE_MAGIC and len(data) >= PICTURE_HEADER_SIZE:
@@ -199,12 +236,35 @@ class _FrameAssembler:
         if short:
             self._lost()
         data = strip_private_sei(data)
-        if not self._synced:
+        if not data:
+            return
+        found = parameter_sets(data)
+        if found:
+            self.codec = found[1]
+        kind = picture_kind(data, self.codec)
+        self.pictures[kind] += 1
+        if len(self.timeline) < 16:
+            self.timeline.append(f"{kind} {len(data) // 1024} KB")
+        if kind == "PS":
+            self._params = data[found[0]:] if found else data
+            return
+        if self._params is not None:
+            data, self._params = self._params + data, None
             found = parameter_sets(data)
+        keyframe = kind.split("+")[0] in ("IDR", "I")
+        if keyframe and not short:
+            self.keyframes += 1
+        if not self._synced:
             if found is None:
                 return
+            if keyframe:
+                log(f"First keyframe received ({CODEC_NAMES[found[1]]}): video is flowing")
+            elif self._join and time.monotonic() - (self._video_since or 0.0) >= POCKET_JOIN_WAIT:
+                log(f"No keyframe from the camera: joined its running stream ({CODEC_NAMES[found[1]]}); "
+                    "the picture builds up over a few seconds")
+            else:
+                return
             self._synced = True
-            log(f"First keyframe received ({CODEC_NAMES[found[1]]}): video is flowing")
             data = data[found[0]:]
         if data:
             self._deliver(data, self._first_packet)
@@ -246,14 +306,50 @@ class Datalink:
         self._message_seq = 0xA000
         self._cursors = [0, self._base_seq, self._base_seq]   # video, data, extra: echoed in every ack
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
+        except OSError:
+            pass
         self._sock.bind(("0.0.0.0", 0))
         self._lock = threading.Lock()
+        self._unacked: list[tuple[int, bytes, float]] = []   # data packets sent, not acknowledged yet
+        self._acks_seen = False               # the camera acknowledged data packets in this session
+        self._acked_cursor = -1               # the last data packet the camera acknowledged
+        self._last_ack = 0.0                  # monotonic() of the last new acknowledgement
+        self.resent = 0                       # data packets sent again
         self.frames: _FrameAssembler | None = None   # live view assembly (its counters), once receiving
+        self._dump = None                     # diagnostics file (DUMP_DIR)
+        self._dump_lock = threading.Lock()
+
+    # ---- diagnostics
+    def _open_dump(self) -> None:
+        if not DUMP_DIR:
+            return
+        try:
+            folder = Path(DUMP_DIR)
+            folder.mkdir(parents=True, exist_ok=True)
+            label = "live" if self.start_live_view else "identify"
+            path = folder / f"{time.strftime('%H%M%S')}-{self.host}-{label}-{self._session:04x}.osmodump"
+            self._dump = path.open("wb")
+            log(f"Diagnostics: this {label} session is written to {path}")
+        except OSError as error:
+            log(f"Diagnostics: could not write to {DUMP_DIR} ({error})")
+
+    def _record(self, direction: int, packet: bytes) -> None:
+        dump = self._dump
+        if dump is not None:
+            with self._dump_lock:
+                try:
+                    dump.write(_DUMP_RECORD.pack(time.perf_counter(), direction, len(packet)) + packet)
+                except (OSError, ValueError):
+                    pass
 
     # ---- sending
     def _send_link(self, kind: int, body: bytes) -> None:
         with self._lock:
-            self._sock.sendto(link_packet(kind, self._session, self._link_seq, body), (self.host, self.port))
+            packet = link_packet(kind, self._session, self._link_seq, body)
+            self._sock.sendto(packet, (self.host, self.port))
+            self._record(1, packet)
             self._link_seq = (self._link_seq + SEQ_STEP) & 0xFFFF
 
     def _send_data(self, message: Message) -> None:
@@ -262,8 +358,40 @@ class Datalink:
             routing = struct.pack("<HH4xBB2x", (seq - SEQ_STEP) & 0xFFFF, seq, self._data_count & 0xFF, 1)
             packet = link_packet(Packet.DATA, self._session, seq, routing + message.encode())
             self._sock.sendto(packet, (self.host, self.port))
+            self._record(1, packet)
+            self._unacked.append((seq, packet, time.monotonic()))
+            del self._unacked[:-UNACKED_MAX]
             self._data_seq = (seq + SEQ_STEP) & 0xFFFF
             self._data_count = (self._data_count + 1) & 0xFF
+
+    def _acknowledged(self, cursor: int) -> None:
+        """The camera took our data packets up to `cursor`. Only a cursor that names a packet we sent counts
+        (a camera that reports something else there never gets packets sent again)."""
+        with self._lock:
+            for i, (seq, _packet, _sent) in enumerate(self._unacked):
+                if seq == cursor:
+                    self._unacked = self._unacked[i + 1:]
+                    self._acks_seen = True
+                    return
+
+    def _resend(self) -> None:
+        """Send the unacknowledged data packets again, in order (see RESEND_AFTER)."""
+        with self._lock:
+            if not self._unacked or not self._acks_seen:
+                return
+            now = time.monotonic()
+            first_sent = self._unacked[0][2]
+            if now - first_sent < RESEND_AFTER:
+                return
+            if self.resent and now - self._last_ack > RESEND_GIVE_UP:
+                return
+            if not self.resent:
+                log(f"Datalink: the camera missed a command packet; sending the last {len(self._unacked)} again")
+            for i, (seq, packet, _sent) in enumerate(self._unacked):
+                self._sock.sendto(packet, (self.host, self.port))
+                self._record(1, packet)
+                self._unacked[i] = (seq, packet, now)
+            self.resent += len(self._unacked)
 
     def send(self, cmd_set: int, cmd_id: int, payload: bytes = b"", receiver: int | None = None,
              flags: int = FLAG_REQUEST) -> int:
@@ -296,6 +424,7 @@ class Datalink:
                     data, _ = self._sock.recvfrom(65535)
                 except socket.timeout:
                     break
+                self._record(0, data)
                 if len(data) >= 8 and data[6] == Packet.HANDSHAKE:
                     self._link_seq = self._data_seq = (self._base_seq + SEQ_STEP) & 0xFFFF
                     log("Datalink handshake OK")
@@ -313,6 +442,7 @@ class Datalink:
                 data, _ = self._sock.recvfrom(65535)
             except socket.timeout:
                 continue
+            self._record(0, data)
             if len(data) == 34 and data[6] == Packet.LINK:
                 self._data_seq = (struct.unpack_from("<H", data, 8)[0] + SEQ_STEP) & 0xFFFF
                 return
@@ -355,8 +485,9 @@ class Datalink:
         log("Registered and live view requested" + (" (Action series)" if self.liveview == "action" else ""))
 
     def request_keyframe(self) -> None:
-        """Ask for the live view again: the camera answers with a fresh keyframe. Never in a loop: each
-        request restarts the encoder (see client/watchdog.py)."""
+        """Ask for the live view again: the camera answers with a fresh keyframe (not an Osmo Pocket 3 whose
+        stream runs: see POCKET_JOIN_WAIT). Never in a loop: each request restarts the encoder (see
+        client/watchdog.py)."""
         self.send(0x09, 0xA8, bytes((0, 4, 2, 0, 0, 0, 0, 0, 0, 0)))
 
     def _trigger_encoder(self) -> None:
@@ -381,12 +512,13 @@ class Datalink:
         while not self.stopped.is_set():
             try:
                 self._send_link(Packet.ACK, ack_body(*self._cursors))
+                self._resend()
             except OSError:
                 pass
             time.sleep(ACK_INTERVAL)
 
     def _receive(self) -> None:
-        frames = self.frames = _FrameAssembler(self._deliver_video)
+        frames = self.frames = _FrameAssembler(self._deliver_video, join=self.liveview == "pocket")
         video_at = 0.0                        # perf_counter() of the last video packet
         self._sock.settimeout(FRAME_IDLE)
         while not self.stopped.is_set():
@@ -398,6 +530,7 @@ class Datalink:
             except OSError:
                 break
             now = time.perf_counter()
+            self._record(0, packet)
             self.stats["packets"] += 1
             if len(packet) < VIDEO_HEADER_SIZE:
                 continue
@@ -418,6 +551,9 @@ class Datalink:
                     self._cursors[0] = struct.unpack_from("<H", packet, 10)[0]
                 self._cursors[1] = struct.unpack_from("<H", packet, 18)[0]
                 self._cursors[2] = struct.unpack_from("<H", packet, 26)[0]
+                if self._cursors[2] != self._acked_cursor:
+                    self._acked_cursor, self._last_ack = self._cursors[2], time.monotonic()
+                    self._acknowledged(self._acked_cursor)
             elif kind == Packet.LINK_DATA:
                 self._cursors[1] = seq
             for message in parse_all(packet[8:]):
@@ -435,6 +571,7 @@ class Datalink:
 
     def run(self) -> None:
         self._sock.settimeout(0.25)
+        self._open_dump()
         try:
             self._handshake()
             if self.liveview == "pocket":
@@ -454,6 +591,9 @@ class Datalink:
         finally:
             self.stopped.set()
             self._sock.close()
+            if self._dump is not None:
+                with self._dump_lock:
+                    self._dump.close()
 
     def stop(self) -> None:
         self.stopped.set()
@@ -465,4 +605,13 @@ class Datalink:
         replies = ", ".join(f"{s:02x}/{i:02x} from {sender:02x}: {payload or '-'}"
                             for (s, i, sender), payload in list(self.replies.items())[:12]) or "none"
         short = f"; incomplete pictures: {self.frames.truncated}" if self.frames and self.frames.truncated else ""
-        return f"camera packets: {kinds}; replies: {replies}{short}"
+        resent = f"; command packets sent again: {self.resent}" if self.resent else ""
+        return f"camera packets: {kinds}; replies: {replies}{short}{resent}; {self.pictures_summary()}"
+
+    def pictures_summary(self) -> str:
+        """The pictures of this session by kind (IDR, I, P; +PS: with parameter sets), and the first ones."""
+        frames = self.frames
+        if frames is None or not frames.pictures:
+            return "pictures: none"
+        kinds = ", ".join(f"{k} {n}" for k, n in frames.pictures.most_common())
+        return f"pictures: {kinds} (first: {', '.join(frames.timeline[:8])})"

@@ -51,7 +51,9 @@ class VideoDecoder(threading.Thread):
     def _codec(kind: str = H264) -> av.CodecContext:
         codec = av.CodecContext.create(kind, "r")
         # Output each frame as soon as it is decoded: the live stream has no B-frames, nothing to reorder.
-        codec.options = {"flags": "low_delay", "flags2": "fast"}
+        # output_corrupt: also the pictures of a stream joined without a keyframe (an Osmo Pocket 3 refreshes
+        # its pictures gradually: they build up within a few seconds); FFmpeg would otherwise hold them back.
+        codec.options = {"flags": "low_delay+output_corrupt", "flags2": "fast"}
         codec.thread_type = "SLICE"
         return codec
 

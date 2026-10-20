@@ -115,6 +115,13 @@ class CameraRegistry:
                     cam["in_station"] = on
                     self._save()
 
+    def station_hosts(self, besides: str) -> set[str]:
+        """Where the other cameras that were put on a shared network (and not back yet) were last found."""
+        with self._lock:
+            own = next((c.get("host") for c in self.cameras if c["address"] == besides), None)
+            return {c["host"] for c in self.cameras if c["address"] != besides and c.get("in_station")
+                    and c.get("host") and c["host"] != own}
+
     def forget(self, address: str) -> None:
         with self._lock:
             self.cameras = [c for c in self.cameras if c["address"] != address.upper()]

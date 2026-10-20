@@ -55,3 +55,50 @@ def codec_of(unit: bytes, limit: int = 2048) -> str | None:
     """H264 or HEVC when the access unit starts with parameter sets (a keyframe), otherwise None."""
     found = parameter_sets(unit, limit)
     return found[1] if found else None
+
+
+def _ue(data: bytes, bit: int) -> tuple[int, int]:
+    """One unsigned Exp-Golomb value at bit offset `bit`: (value, next bit offset)."""
+    zeros = 0
+    while bit < len(data) * 8 and not data[bit >> 3] >> (7 - (bit & 7)) & 1:
+        zeros, bit = zeros + 1, bit + 1
+    value = 0
+    for _ in range(zeros + 1):
+        if bit >= len(data) * 8:
+            return -1, bit
+        value, bit = value << 1 | data[bit >> 3] >> (7 - (bit & 7)) & 1, bit + 1
+    return value - 1, bit
+
+
+def picture_kind(unit: bytes, codec: str | None = H264) -> str:
+    """What an access unit holds, for diagnostics: 'IDR', 'I', 'P' (or 'B') for its first slice, with
+    '+PS' when parameter sets come with it; 'PS' for parameter sets alone; '?' otherwise. For H.265 a
+    random-access picture (IRAP, types 16-21) counts as 'IDR' and any other slice as 'P'."""
+    kinds: list[str] = []
+    params = False
+    for at in nal_starts(unit):
+        if at + 1 >= len(unit):
+            break
+        first = unit[at]
+        if codec == HEVC:
+            kind = first >> 1 & 0x3F
+            if 32 <= kind <= 34:
+                params = True                               # VPS / SPS / PPS
+            elif kind < 32:
+                kinds.append("IDR" if 16 <= kind <= 21 else "P")
+        elif not first & 0x80 and first & 0x1F in (7, 8):
+            params = True                                   # SPS / PPS
+        elif not first & 0x80 and first & 0x1F in (1, 5):
+            if first & 0x1F == 5:
+                kinds.append("IDR")
+            else:                                           # first_mb_in_slice, then slice_type
+                head = unit[at + 1:at + 9].replace(b"\x00\x00\x03", b"\x00\x00")
+                _, bit = _ue(head, 0)
+                slice_type, _ = _ue(head, bit)
+                kinds.append({0: "P", 1: "B", 2: "I", 3: "P", 4: "I"}.get(slice_type % 5, "?"))
+        if kinds:
+            break
+    kind = kinds[0] if kinds else ""
+    if params:
+        return kind + "+PS" if kind else "PS"
+    return kind or "?"

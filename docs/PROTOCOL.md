@@ -158,7 +158,7 @@ network. Over BLE, to receiver `07`:
 | step | command | payload | reply |
 |---|---|---|---|
 | read the role | `07/39` | `00` | `00 00` access point, `00 01` station; the Osmo Nano answers `E0` (no read) |
-| become a station | `07/48` | `01` | `00 00` (Osmo Nano: `00`); wait ~10 s before joining |
+| become a station | `07/48` | `01` | `00 00` (Osmo Nano: `00`), sometimes only after 5-6 s; wait ~10 s before joining |
 | join a network | `07/47` | `<len> <SSID> <len> <password>` | `00 00` or `00 00 00` joined; `01 FF` refused for now (retry after 5 s; seen on WPA3-only networks) |
 | back to its access point | `07/48` | `00` | `00` / `00 00` |
 
@@ -167,8 +167,11 @@ the same TCP 7001 poke, UDP 9004 datalink and HTTP media as on its own access po
 7001 on the local network, open a datalink with each host that answers and ask `07/07` (to receiver
 `07`): the reply is the name of the camera's own access point, the same as over BLE, which tells the
 cameras apart. WPA3-only networks are refused by the Osmo Nano; WPA2 (or WPA2/WPA3) works. Guest networks
-that keep devices apart don't work. Osmo Client's implementation of this section follows the
-OpenPocketCine project's notes and has not been exercised on a camera yet.
+that keep devices apart don't work. Follows the OpenPocketCine project's notes; verified with an Osmo Nano
+and an Osmo Pocket 3 on the same 5 GHz WPA2 network, both streaming to one computer.
+
+An identity check opens a datalink session with the host it asks, which ends any session that camera had:
+never ask an address where another camera this computer uses is known to be.
 
 ## 5. The UDP datalink
 
@@ -197,7 +200,7 @@ Packet types:
 | type | direction | content |
 |---|---|---|
 | 0 | both | handshake |
-| 1 | camera → client | link packet; u16 at offset 10 = video cursor, 18 = data cursor, 26 = extra cursor |
+| 1 | camera → client | link packet; u16 at offset 10 = video cursor, 18 = data cursor, 26 = extra cursor (the last data packet of the client's the camera took, 5.5) |
 | 2 | camera → client | video |
 | 3 | camera → client | link packet; its header sequence is the data cursor |
 | 4 | client → camera | acknowledgement |
@@ -247,6 +250,13 @@ A type-5 packet carries one DUML frame after a 12-byte routing header:
 The link header's sequence is the data sequence too. `counter` increments by one per data packet.
 The DUML frame inside uses sender `0x02`, receiver `0x01` (or `0x41` for `09/A8`), flags `0x40` and its
 own message sequence (the apps start at `0xA000`).
+
+The camera takes data packets only in order: one whose previous sequence is not the last it took is
+dropped, and so is every one after it. The last one it took is the u16 at offset 26 (also 24) of its
+type-1 packets. So keep each data packet until that cursor names it, and send a packet still
+unacknowledged after ~0.3 s again, together with the ones after it, in order. Without this, one data
+packet lost on the way silences every later command (no replies; an Osmo Pocket stops its video 8-10 s
+later, as it no longer hears `00/88`). Seen on a shared network with two cameras, a few times an hour.
 
 ### 5.6 Registration and live view
 
@@ -316,7 +326,17 @@ The first packet of each picture starts with a 16-byte picture header:
 The access unit follows; collect packets until that many bytes have arrived. Each picture from the Nano
 also carries a private SEI: `00 00 01 06 F0 19`, 25 raw bytes, `80`. Those bytes are not escaped and can
 contain `00 00 01`, so remove the whole SEI (by its fixed length) before decoding. Start decoding at the
-first SPS (`00 00 00 01 67`).
+first keyframe (an IDR picture) with its parameter sets (SPS `00 00 00 01 67`, PPS). The Osmo Nano sends one
+about every second, with the parameter sets in the same picture.
+
+**Osmo Pocket 3.** It sends a keyframe only when its stream starts: the parameter sets as a picture of
+their own, then the IDR picture about 1 ms later. After that come only P pictures, with the parameter sets
+repeated alone every 1.5 s, and the picture refreshes itself gradually: a lost packet heals within ~1.5 s,
+so nothing needs asking. The stream keeps running after a session ends, and `09/A8` brings no keyframe
+while it runs, so a new session (a reconnect, a restart) can receive the running stream without one.
+Start decoding it at its parameter sets and let the decoder output pictures that are still building up
+(FFmpeg: `flags output_corrupt`; by default it shows nothing until a keyframe): the moving parts show at
+once and the picture is complete within a few seconds.
 
 Without picture headers (not seen on the Nano), split pictures on the group number: a picture arrives as
 a burst of packets less than 0.3 ms apart followed by ~30 ms of silence, so it can be handed to the
@@ -642,7 +662,10 @@ In playback the microSD fields can read 0: keep the last non-zero values.
    Next page: `cursor + number of records` (pages overlap by one record).
 3. **Answer**: the reply is `00`, then `00/27` chunks arrive. Each starts with a 10-byte sub-header
    `4a <type> <length u16> <counter u16> <seq u16> 00 00` (type `04` start, `01` data, `03` end).
-   Concatenating the data chunks in `seq` order gives the manifest.
+   Concatenating the data chunks in `seq` order gives the manifest. The length counts the sub-header and
+   uses bits 0-11; bit `0x1000` marks the **last data chunk**. The end chunk can arrive before the data
+   (an Osmo Pocket 3 sends it first, then again every 0.2 s), so the list is complete when the last data
+   chunk and every one before it are there, not at the first end chunk.
 4. **Manifest**: u32 record count, then per record a block anchored on a `19 06` tag at offset T:
 
    | offset | field |
@@ -675,9 +698,8 @@ Items 6 and 7 follow the OpenPocketCine project's notes (the delete layout is th
 Both verified on an Osmo Nano: the favourite mark shows on the camera, and a deleted file is gone from the
 next listing.
 
-**Osmo Pocket 3.** It answers the media mode request with `E0`, yet lists its newest page (45 files)
-all the same; older pages need the media mode (OpenPocketCine's notes), so for now only the newest files
-are listed. It has one microSD card and no internal memory: download everything with `storage=0`, even
+**Osmo Pocket 3.** It answers the media mode request with `E0`, yet lists its files all the same, page
+after page (70 files tried, in pages of 45). It has one microSD card and no internal memory: download everything with `storage=0`, even
 when a handle has bit 30 set (it answers `D6` for the internal-memory cursor). Its records put the file
 name at the end, after the path TLVs (the Nano puts it before them): a path belongs to the file whose name
 it ends with. They may carry other bytes than `FF` / `FE` before the `19 06` tag and another type byte for
@@ -732,7 +754,8 @@ Pocket 3 since Osmo Client 1.6; the Pocket 4 and 4P are not exercised with it ye
 2. `00/81` → `0x48`, flags `0x80`, the 62-byte app record; `00/88` → `0x28` (`17 00 46 23 7C 'APP' 00×5
    02`); `03/DA [05 FF FF FF FF]` → `0x03` (the gimbal learns an app is attached); the topic subscriptions.
 3. `02/68 [08]` → `0x01`, then `09/A8` (same payload as the Nano's) → **`0x08`**. No `02/09`.
-4. `00/88` again every second: the video stops 8-10 s after the last one.
+4. `00/88` again every second: the video stops 8-10 s after the last one (after the last data packet the
+   camera took: see 5.5).
 
 A pairing reply `00 06` means "try again in a moment". On 5.8 GHz the access point can take about a
 minute to appear.
