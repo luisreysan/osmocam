@@ -36,7 +36,7 @@ computer                                   camera
  │  Wi-Fi: join the camera's access point     │   192.168.2.1, WPA2-PSK
  │  TCP 7001: one pairing frame ("poke")  ──▶ │
  │  UDP 9004: handshake, then                 │
- │     ◀── video (H.264), status pushes,      │
+ │     ◀── video (H.264 / H.265), status,     │
  │         replies, camera requests           │
  │     ──▶ acks every 25 ms, commands,        │
  │         answers to camera requests         │
@@ -291,7 +291,11 @@ keeps it alive. The apps send this to every model except the Nano, after the com
 | `00/82` | `0x48` | `0x80` | `00` | at start, then every 2 s |
 | `00/4F` | `0x48` | `0x40` | `01 00 <counter u8> 00 00 FF FF FF FF` (counter +1 every 400 ms) | every 200 ms |
 
-On the Action 5 Pro, `09/A8` answers `EE` from `0x41`.
+On the Action 5 Pro, `09/A8` answers `EE` from `0x41`. The **Osmo Action 4** streams with these (seen in
+a tester's packet dumps): `09/A8` answers `00` from `0x41` and `02/09` answers `D9`. Its live view is H.265
+(1280×720, 25 fps) with a 12-byte picture header (5.8): a keyframe after `09/A8`, then P pictures that
+refresh gradually, with the parameter sets alone about every 1.5 s; a session can start there, like the
+Pocket 3's (5.8).
 
 ### 5.7 Answering the camera's requests
 
@@ -310,18 +314,19 @@ show "connecting…" every few seconds.
 
 ### 5.8 Video
 
-Type-2 packets carry H.264 (Annex-B) after a 20-byte header (8-byte link header + 12 bytes). Their
-header sequence advances by 8 per packet, so a gap means a lost packet. Byte 16 is a transport group
+Type-2 packets carry H.264 or H.265 (Annex-B) after a 20-byte header (8-byte link header + 12 bytes).
+Their header sequence advances by 8 per packet, so a gap means a lost packet. Byte 16 is a transport group
 number, not a picture id: on the Osmo Nano a group ends after 63 packets, and a keyframe can be bigger
 than that, so a picture can span two groups.
 
-The first packet of each picture starts with a 16-byte picture header:
+The first packet of each picture starts with a picture header:
 
 | offset | size | content |
 |---|---|---|
 | 0 | 4 | `00 00 01 FF` |
 | 4 | 4 | size of the access unit (u32 LE) |
-| 8 | 8 | metadata |
+| 8 | 1 | length of this header in the low bits: `90` = 16 bytes (Osmo Nano, Pocket 3), `0C` = 12 bytes (Osmo Action 4) |
+| 9 | 3 or 7 | metadata (16-byte header: a timestamp at offset 12) |
 
 The access unit follows; collect packets until that many bytes have arrived. Each picture from the Nano
 also carries a private SEI: `00 00 01 06 F0 19`, 25 raw bytes, `80`. Those bytes are not escaped and can
@@ -733,7 +738,7 @@ is tested with both apps; the Osmo Pocket 3 with Osmo Client.
 |---|---|---|
 | `0x0010` | Osmo Action 2 | |
 | `0x0012` | Osmo Action 3 | |
-| `0x0014` | Osmo Action 4 | |
+| `0x0014` | Osmo Action 4 | H.265 live view (1280×720, 25 fps), 12-byte picture header (5.8) |
 | `0x0015` | Osmo Action 5 Pro | |
 | `0x0017` | Osmo 360 | WPA3 Wi-Fi and 360° video: not supported |
 | `0x0018` | Osmo Action 6 | |

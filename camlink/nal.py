@@ -1,7 +1,7 @@
 """Annex-B access units: start codes and the parameter sets that tell H.264 from H.265.
 
-The Osmo Nano, the Pocket 3 and the Action series send H.264 (AVC); the Pocket 4 and 4P send H.265
-(HEVC). Parameter sets come only with keyframes: AVC SPS (NAL type 7) / PPS (8), HEVC VPS (32), SPS (33),
+The Osmo Nano and the Pocket 3 send H.264 (AVC); the Pocket 4, 4P and the Action 4 send H.265 (HEVC).
+Parameter sets come only with keyframes: AVC SPS (NAL type 7) / PPS (8), HEVC VPS (32), SPS (33),
 PPS (34), whose two-byte NAL headers start 40 01, 42 01, 44 01.
 
 H.264 is recognised by its SPS alone, followed by a profile byte: the first byte of many H.265 NAL headers

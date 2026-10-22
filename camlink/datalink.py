@@ -1,4 +1,4 @@
-"""The Wi-Fi datalink: DUML commands, status pushes and the H.264 live view, over one UDP socket.
+"""The Wi-Fi datalink: DUML commands, status pushes and the live view (H.264 or H.265), over one UDP socket.
 
 Once the computer is on the camera's access point, one pairing frame sent to TCP 7001 wakes the link;
 then everything runs over UDP (port 9004 on the Osmo cameras). Every UDP packet starts with an 8-byte
@@ -43,10 +43,12 @@ VIDEO_HEADER_SIZE = 20          # video packets: 8-byte link header + 12 bytes, 
 GROUP_OFFSET = 16
 SEQ_STEP = 8                    # sequences advance in steps of 8
 ACK_INTERVAL = 0.025
-# The first packet of each picture starts with 00 00 01 FF, the size of the access unit (u32 LE) and 8
-# bytes of metadata; the access unit follows.
+# The first packet of each picture starts with 00 00 01 FF, the size of the access unit (u32 LE) and
+# metadata; the access unit follows. Byte 8 gives the header's length in its low bits: 0x90, 16 bytes on the
+# Osmo Nano and Pocket 3 (a timestamp at 12); 0x0C, 12 bytes on the Osmo Action 4.
 PICTURE_MAGIC = b"\x00\x00\x01\xff"
-PICTURE_HEADER_SIZE = 16
+PICTURE_HEADER_SIZE = 16                # when byte 8 makes no sense
+PICTURE_HEADER_MIN = 12
 # The Osmo Nano adds a private SEI to each picture: NAL type 6, payload type 0xF0, 25 raw bytes, then the
 # 0x80 stop bit. The raw bytes are not escaped and can contain 00 00 01, which a decoder would read as the
 # start of another NAL unit, so the whole SEI is removed.
@@ -67,8 +69,9 @@ TELEMETRY_WAIT = 2.0
 # sessions (there is no command that stops it, and 0x09/0xA8 brings no keyframe while it runs). Its pictures
 # refresh themselves gradually instead (parameter sets every 1.5 s): a lost packet heals within ~1.5 s, and a
 # session that joins the running stream can start at its parameter sets; that picture builds up over a few
-# seconds. So a Pocket session takes the first picture with parameter sets when no keyframe comes.
-POCKET_JOIN_WAIT = 1.0          # video without a keyframe this long: join the running stream
+# seconds. So a Pocket session takes the first picture with parameter sets when no keyframe comes. The Osmo
+# Action 4 refreshes its pictures the same way, so Action series sessions do too.
+JOIN_WAIT = 1.0                 # video without a keyframe this long: join the running stream
 # A keyframe arrives as a burst of packets: a larger receive buffer keeps it whole while the app is busy.
 RECEIVE_BUFFER = 2 << 20
 # Data packets (the client's commands) form a chain: each names the one before it, and the camera drops
@@ -125,6 +128,12 @@ def poke(host: str = CAMERA_HOST) -> None:
         log(f"Datalink poke failed ({error}), continuing")
 
 
+def picture_header_size(data: bytes) -> int:
+    """Length of the picture header at the start of `data` (see PICTURE_MAGIC)."""
+    size = data[8] & 0x3F
+    return size if PICTURE_HEADER_MIN <= size <= len(data) else PICTURE_HEADER_SIZE
+
+
 def strip_private_sei(unit: bytes) -> bytes:
     """Remove the camera's private SEI (see PRIVATE_SEI) from an access unit, by its fixed length."""
     start = 0
@@ -153,8 +162,8 @@ class _FrameAssembler:
     so parameter sets don't mean a picture can be decoded. Parameter sets that come alone ride with the
     next picture.
 
-    `join`: a camera that refreshes its pictures gradually (Osmo Pocket 3) may also be joined at its
-    parameter sets after POCKET_JOIN_WAIT without a keyframe; the decoder then shows the picture while it
+    `join`: a camera that refreshes its pictures gradually (Osmo Pocket 3, Action 4) may also be joined at
+    its parameter sets after JOIN_WAIT without a keyframe; the decoder then shows the picture while it
     builds up."""
 
     def __init__(self, deliver: Callable[[bytes, float], None], join: bool = False) -> None:
@@ -188,7 +197,7 @@ class _FrameAssembler:
             self._video_since = time.monotonic()
         lost = self._next_seq is not None and seq != self._next_seq
         self._next_seq = (seq + SEQ_STEP) & 0xFFFF
-        if data[:4] == PICTURE_MAGIC and len(data) >= PICTURE_HEADER_SIZE:
+        if data[:4] == PICTURE_MAGIC and len(data) >= PICTURE_HEADER_MIN:
             if self._data:
                 self.finish(short=True)       # the previous picture never completed
             elif lost and not self._dropping:
@@ -197,7 +206,7 @@ class _FrameAssembler:
             self._headers = True
             self._need = int.from_bytes(data[4:8], "little")
             self._first_packet = now
-            data = data[PICTURE_HEADER_SIZE:]
+            data = data[picture_header_size(data):]
         elif self._need:
             if lost:
                 self.finish(short=True)       # the rest of this picture can't be placed: drop it
@@ -259,7 +268,7 @@ class _FrameAssembler:
                 return
             if keyframe:
                 log(f"First keyframe received ({CODEC_NAMES[found[1]]}): video is flowing")
-            elif self._join and time.monotonic() - (self._video_since or 0.0) >= POCKET_JOIN_WAIT:
+            elif self._join and time.monotonic() - (self._video_since or 0.0) >= JOIN_WAIT:
                 log(f"No keyframe from the camera: joined its running stream ({CODEC_NAMES[found[1]]}); "
                     "the picture builds up over a few seconds")
             else:
@@ -486,7 +495,7 @@ class Datalink:
 
     def request_keyframe(self) -> None:
         """Ask for the live view again: the camera answers with a fresh keyframe (not an Osmo Pocket 3 whose
-        stream runs: see POCKET_JOIN_WAIT). Never in a loop: each request restarts the encoder (see
+        stream runs: see JOIN_WAIT). Never in a loop: each request restarts the encoder (see
         client/watchdog.py)."""
         self.send(0x09, 0xA8, bytes((0, 4, 2, 0, 0, 0, 0, 0, 0, 0)))
 
@@ -518,7 +527,7 @@ class Datalink:
             time.sleep(ACK_INTERVAL)
 
     def _receive(self) -> None:
-        frames = self.frames = _FrameAssembler(self._deliver_video, join=self.liveview == "pocket")
+        frames = self.frames = _FrameAssembler(self._deliver_video, join=self.liveview != "nano")
         video_at = 0.0                        # perf_counter() of the last video packet
         self._sock.settimeout(FRAME_IDLE)
         while not self.stopped.is_set():

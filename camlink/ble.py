@@ -14,6 +14,8 @@ this computer's hotspot) as a station: see join_network(). Verified on an Osmo N
 from __future__ import annotations
 
 import asyncio
+import shutil
+import sys
 import time
 from collections.abc import Callable
 
@@ -81,6 +83,33 @@ async def scan(seconds: float, on_found: Callable[[dict], None] | None = None,
         while time.monotonic() < end and not (stop and stop()):
             await asyncio.sleep(0.25)
     return found
+
+
+async def _bluetoothctl(*args: str) -> str:
+    process = await asyncio.create_subprocess_exec("bluetoothctl", *args, stdout=asyncio.subprocess.PIPE,
+                                                   stderr=asyncio.subprocess.DEVNULL)
+    try:
+        out, _ = await asyncio.wait_for(process.communicate(), 10)
+    except asyncio.TimeoutError:
+        process.kill()
+        raise
+    return out.decode(errors="replace")
+
+
+async def release_stale_link(address: str) -> bool:
+    """Linux: when the app ends without closing its link (killed), BlueZ keeps the camera connected; the
+    camera then stops advertising and is never found again. Drop such a link. True if there was one."""
+    if not sys.platform.startswith("linux") or not shutil.which("bluetoothctl"):
+        return False
+    try:
+        if "Connected: yes" not in await _bluetoothctl("info", address):
+            return False
+        await _bluetoothctl("disconnect", address)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    log(f"Camera {address} was still connected over Bluetooth from an earlier run: disconnected it")
+    await asyncio.sleep(1.0)              # the camera advertises again a moment later
+    return True
 
 
 class BleLink:
@@ -215,6 +244,8 @@ class BleLink:
             return True
 
         device = await BleakScanner.find_device_by_filter(wanted, timeout=15)
+        if device is None and address and await release_stale_link(address.upper()):
+            device = await BleakScanner.find_device_by_filter(wanted, timeout=15)
         if device is None:
             raise RuntimeError((f"Camera {address} not found" if address else "No DJI Osmo camera found")
                                + " over Bluetooth (is it on, nearby, and not connected to the phone app?)")
