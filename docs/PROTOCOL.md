@@ -475,24 +475,27 @@ In Slow-mo the Pocket 3 takes the factor in byte 3: `02/18 [res, fps, 00, factor
 `10 0A 00 04 00`), where the Nano takes it in byte 4. Colour profile `02/42`: `00` Normal, `3C` HLG,
 `3D` D-Log M.
 
-**Osmo Action 4** (a tester's camera report). It publishes no `camcap_*` table either (every one answers
-`01`), and it refuses the `02/8E` aspect write (`E3`): `02/18` goes alone. The slow-mo factor is in byte 4,
-as on the Nano. What it accepted:
+**Osmo Action 4** (a tester's camera reports and the camera's manual). It publishes no `camcap_*` table
+either (every one answers `01`), and it refuses the `02/8E` aspect write (`E3`): `02/18` goes alone, 4:3
+codes too. The slow-mo factor is in byte 4, as on the Nano. Its choices:
 
 | mode | resolutions | fps |
 |---|---|---|
+| Video | 4K, 2.7K, 1080p 16:9; 4K, 2.7K 4:3 (`67`, `5F`; 1080p 4:3 `0C` refused) | 24-60; 4K and 2.7K 16:9 also 100, 120; 1080p also 100, 120, 200, 240 |
 | Low-Light (`28`) | 4K, 2.7K, 1080p 16:9 | 24, 25, 30 |
 | Timelapse | 4K, 2.7K, 1080p 16:9 | 25, 30 |
 | Hyperlapse | 4K, 2.7K, 1080p 16:9 | 30 (25 refused) |
 | Slow-mo | 4K, 2.7K, 1080p at 120 fps (factor 4); 1080p at 240 fps (factor 8) | |
 
-Video mode was not checked yet (the aspect write came first and was refused).
+Every entry was accepted and read back, except the Video rates above 60 fps and 4K 4:3 at 60 fps, which come
+from the manual and are not checked yet.
 
 ### 7.3 Photo format
 
 `02/12 [size, ratio]`, read with `02/13` (photo mode only). Size `04` = L, `03` = M; ratio `00` = 4:3,
 `01` = 16:9. L 4:3 = 36 MP, L 16:9 = 31 MP, M 4:3 = 9 MP, M 16:9 = 8 MP. Osmo Pocket 3 (and 4 / 4P):
-`00 01` = 16:9, `00 03` = 1:1. The Osmo Action 4 refuses the L and M sizes (`E3`) and takes `00 00`.
+`00 01` = 16:9, `00 03` = 1:1. The Osmo Action 4 has one size (about 10 MP) and refuses the L and M ones
+(`E3`): `00 00` = 4:3; 16:9 is taken to be `00 01`, as on the Pockets (not checked yet).
 
 ### 7.4 White balance
 
