@@ -475,11 +475,24 @@ In Slow-mo the Pocket 3 takes the factor in byte 3: `02/18 [res, fps, 00, factor
 `10 0A 00 04 00`), where the Nano takes it in byte 4. Colour profile `02/42`: `00` Normal, `3C` HLG,
 `3D` D-Log M.
 
+**Osmo Action 4** (a tester's camera report). It publishes no `camcap_*` table either (every one answers
+`01`), and it refuses the `02/8E` aspect write (`E3`): `02/18` goes alone. The slow-mo factor is in byte 4,
+as on the Nano. What it accepted:
+
+| mode | resolutions | fps |
+|---|---|---|
+| Low-Light (`28`) | 4K, 2.7K, 1080p 16:9 | 24, 25, 30 |
+| Timelapse | 4K, 2.7K, 1080p 16:9 | 25, 30 |
+| Hyperlapse | 4K, 2.7K, 1080p 16:9 | 30 (25 refused) |
+| Slow-mo | 4K, 2.7K, 1080p at 120 fps (factor 4); 1080p at 240 fps (factor 8) | |
+
+Video mode was not checked yet (the aspect write came first and was refused).
+
 ### 7.3 Photo format
 
 `02/12 [size, ratio]`, read with `02/13` (photo mode only). Size `04` = L, `03` = M; ratio `00` = 4:3,
 `01` = 16:9. L 4:3 = 36 MP, L 16:9 = 31 MP, M 4:3 = 9 MP, M 16:9 = 8 MP. Osmo Pocket 3 (and 4 / 4P):
-`00 01` = 16:9, `00 03` = 1:1.
+`00 01` = 16:9, `00 03` = 1:1. The Osmo Action 4 refuses the L and M sizes (`E3`) and takes `00 00`.
 
 ### 7.4 White balance
 
@@ -732,13 +745,13 @@ point.
 ## 12. Models
 
 Model ids in the BLE advertisement (from [osmosis](https://github.com/KonradIT/osmosis)). The Osmo Nano
-is tested with both apps; the Osmo Pocket 3 with Osmo Client.
+and the Osmo Action 4 are tested with both apps; the Osmo Pocket 3 with Osmo Client.
 
 | id | model | notes |
 |---|---|---|
 | `0x0010` | Osmo Action 2 | |
 | `0x0012` | Osmo Action 3 | |
-| `0x0014` | Osmo Action 4 | H.265 live view (1280×720, 25 fps), 12-byte picture header (5.8) |
+| `0x0014` | Osmo Action 4 | tested with Osmo Client and OsmoCam: H.265 live view (1280×720, 25 fps), 12-byte picture header (5.8); formats (7.2) |
 | `0x0015` | Osmo Action 5 Pro | |
 | `0x0017` | Osmo 360 | WPA3 Wi-Fi and 360° video: not supported |
 | `0x0018` | Osmo Action 6 | |

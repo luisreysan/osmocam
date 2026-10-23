@@ -2,8 +2,8 @@
 
 DJI cameras advertise manufacturer data under company id 0x08AA starting with the model id (u16 LE).
 The model ids below come from the MIT-licensed osmosis project (https://github.com/KonradIT/osmosis).
-Only the Osmo Nano has been tested with these apps; the other Osmo models use the same transport and
-may work fully or in part. The Osmo 360 is excluded (WPA3 Wi-Fi and 360 video).
+The Osmo Nano and the Osmo Action 4 have been tested with OsmoCam; the other Osmo models use the same
+transport and may work fully or in part. The Osmo 360 is excluded (WPA3 Wi-Fi and 360 video).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ MODELS = {
     0x0017: "Osmo 360", 0x0018: "Osmo Action 6", 0x0019: "Osmo Nano", 0x0020: "Osmo Pocket 3",
     0x0021: "Osmo Pocket 4", 0x0022: "Osmo Pocket 4P",
 }
-TESTED_MODELS = {0x0019}
+TESTED_MODELS = {0x0014, 0x0019}
 NANO = 0x0019
 POCKETS = {0x0020, 0x0021, 0x0022}     # gimbal and zoom; Pocket 4 / 4P stream H.265
 # One microSD card and no internal memory: every file downloads from storage 0, whatever its handle says.

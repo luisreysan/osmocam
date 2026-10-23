@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import contextlib
 import io
+import signal
 import sys
 import threading
 import time
@@ -215,6 +216,8 @@ async def scan(seconds: float) -> None:
 
 
 async def run(args: argparse.Namespace) -> None:
+    if sys.platform != "win32":      # `kill` stops like Ctrl+C (on Linux, BlueZ would keep the camera's link)
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     stop = threading.Event()
     outputs = Outputs(not args.no_vcam, args.fps)
     await asyncio.to_thread(outputs.open_vcam)
@@ -297,7 +300,7 @@ async def run(args: argparse.Namespace) -> None:
             if not time_up():
                 await asyncio.sleep(1)
     except asyncio.CancelledError:
-        log("Ctrl+C: stopping...")
+        log("Stopping...")
         raise
     finally:
         # Shut down in order: end the live view session (its thread would otherwise keep Python from
@@ -339,7 +342,7 @@ def main() -> None:
     try:
         with fine_timer():
             asyncio.run(scan(8) if args.scan else run(args))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     except BleakError as error:
         log(f"Bluetooth is not available: {error} ({ble.UNAVAILABLE_HINT})")
