@@ -14,8 +14,8 @@
 
 </div>
 
-Use a **DJI Osmo Nano** or an **Osmo Action 4** as a webcam, wirelessly, over the camera's own Wi-Fi. Runs
-on **Windows, macOS and Linux**.
+Use your **DJI Osmo** as a webcam, wirelessly, over the camera's own Wi-Fi. Runs on **Windows, macOS and
+Linux**.
 
 OsmoCam receives the camera's live view and feeds it to a virtual camera (the **OBS Virtual Camera** on
 Windows and macOS, a **v4l2loopback** device on Linux), which Zoom, Teams, Google Meet, FaceTime, Discord
