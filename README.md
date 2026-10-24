@@ -1,7 +1,21 @@
+<div align="center">
+
 # OsmoCam
 
-Use a **DJI Osmo Nano** as a webcam, wirelessly, over the camera's own Wi-Fi. Runs on **Windows, macOS
-and Linux**.
+[![Latest release](https://img.shields.io/github/v/release/luisreysan/osmocam?style=for-the-badge&logo=github&logoColor=white&label=release&color=0a6fd1)](https://github.com/luisreysan/osmocam/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-7a5cff?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
+[![Windows · macOS · Linux](https://img.shields.io/badge/runs%20on-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-2d333b?style=for-the-badge)](#requirements)
+[![Python 3.10–3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
+<br>
+[![Tested with Osmo Nano · Action 4](https://img.shields.io/badge/tested%20with-Osmo%20Nano%20%C2%B7%20Action%204-1a8f42?style=for-the-badge)](#compatibility)
+[![Buy me a coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-Ko--fi-ff5e5b?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/luisreysan)
+
+**[Compatibility](#compatibility)** &nbsp;·&nbsp; **[Requirements](#requirements)** &nbsp;·&nbsp; **[Install](#install-and-run)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Troubleshooting](#troubleshooting)** &nbsp;·&nbsp; **[Osmo Client](https://github.com/luisreysan/osmo-client)**
+
+</div>
+
+Use a **DJI Osmo Nano** or an **Osmo Action 4** as a webcam, wirelessly, over the camera's own Wi-Fi. Runs
+on **Windows, macOS and Linux**.
 
 OsmoCam receives the camera's live view and feeds it to a virtual camera (the **OBS Virtual Camera** on
 Windows and macOS, a **v4l2loopback** device on Linux), which Zoom, Teams, Google Meet, FaceTime, Discord
@@ -28,12 +42,30 @@ without opening a video-call app.
 - Low latency: about 12 ms (median) from the first packet of a frame to the virtual camera, plus the
   camera's own capture and Wi-Fi delay.
 - Reconnects by itself if the video stops; puts your Wi-Fi back when it exits.
-- Tested with the Osmo Nano and the Osmo Action 4. Osmo Pocket 3, 4 and 4P: supported experimentally (not
-  tested with a real one yet). Other DJI Osmo cameras (Action 5 Pro/6) use the same protocol and may work,
-  fully or in part. The Osmo 360 is not supported.
+- Tested with the Osmo Nano and the Osmo Action 4; every other Osmo Pocket and Osmo Action: see
+  [Compatibility](#compatibility).
 
 Want to take photos, change modes, ISO and formats, or download your files to your computer? See the
 companion app, **[Osmo Client](https://github.com/luisreysan/osmo-client)**.
+
+## Compatibility
+
+Every DJI Osmo Pocket and Osmo Action, and whether it works with OsmoCam. **Should work** means the camera
+connects the same way and takes the same commands as the tested ones: it should work, though some features
+may differ. Have one of them? A [camera report](https://github.com/luisreysan/osmo-client#test-your-camera)
+shows what works on it, and an [issue](https://github.com/luisreysan/osmo-client/issues) with it is very
+welcome.
+
+| Camera | Tested | Should work | Notes |
+|---|:---:|:---:|---|
+| **Osmo Nano** | ✅ | ✅ | The camera OsmoCam was built with. |
+| **Osmo Action 4** | ✅ | ✅ | Tested by [@stvdrag225](https://github.com/stvdrag225) on a Raspberry Pi 4 with v4l2loopback ([#1](https://github.com/luisreysan/osmo-client/issues/1)): about 77,000 frames without a decoding error. Thank you! |
+| Osmo Pocket 3 |  | ✅ | Tested with Osmo Client, which shares OsmoCam's connection code; not with OsmoCam yet. |
+| Osmo Pocket 4, 4P |  | ✅ | Live view (H.265); not tried on a real one yet. |
+| Osmo Pocket 2, Osmo Pocket |  | ❌ | No built-in Wi-Fi or Bluetooth (they need an accessory), and an older connection. |
+| Osmo Action 2, 3, 5 Pro, 6 |  | ✅ | Same connection as the Action 4; not tried yet. |
+| Osmo Action (first model) |  | ❌ | An older connection, which OsmoCam doesn't use. |
+| Osmo 360 |  | ❌ | Not supported: WPA3-only Wi-Fi and 360° video. |
 
 ## Requirements
 
@@ -193,6 +225,13 @@ with Osmo Client:
 - Linux: `~/.local/share/osmo-pc/cameras.json`
 
 The same folder holds OsmoCam's private Python environment. No telemetry.
+
+## Support
+
+OsmoCam is free and open source, made in my spare time. If it saves you time or money, you can buy me a
+coffee: it keeps the project going. Thank you!
+
+<a href="https://ko-fi.com/luisreysan"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi" height="36"></a>
 
 ## Legal
 
