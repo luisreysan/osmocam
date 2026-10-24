@@ -7,7 +7,7 @@
 [![Windows · macOS · Linux](https://img.shields.io/badge/runs%20on-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-2d333b?style=for-the-badge)](#requirements)
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 <br>
-[![Tested with Osmo Nano · Action 4](https://img.shields.io/badge/tested%20with-Osmo%20Nano%20%C2%B7%20Action%204-1a8f42?style=for-the-badge)](#compatibility)
+[![Tested with Osmo Nano · Pocket 3 · Action 4](https://img.shields.io/badge/tested%20with-Osmo%20Nano%20%C2%B7%20Pocket%203%20%C2%B7%20Action%204-1a8f42?style=for-the-badge)](#compatibility)
 [![Buy me a coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-Ko--fi-ff5e5b?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/luisreysan)
 
 **[Compatibility](#compatibility)** &nbsp;·&nbsp; **[Requirements](#requirements)** &nbsp;·&nbsp; **[Install](#install-and-run)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Troubleshooting](#troubleshooting)** &nbsp;·&nbsp; **[Osmo Client](https://github.com/luisreysan/osmo-client)**
@@ -28,8 +28,8 @@ without opening a video-call app.
 > v4l2loopback device, about 77,000 frames without a decoding error. `kill` now stops OsmoCam as cleanly as
 > Ctrl+C (the camera's Bluetooth link is released).
 >
-> **New in 1.2 (experimental): Osmo Pocket 3, 4 and 4P** as a webcam, including the H.265 live view of
-> the Pocket 4 and 4P. **Not tested with a real Pocket yet**: reports are welcome.
+> **New in 1.2: Osmo Pocket 3, 4 and 4P** as a webcam, including the H.265 live view of the Pocket 4 and
+> 4P. The **Pocket 3 is tested**; the Pocket 4 and 4P are not tried on a real one yet: reports are welcome.
 >
 > **Since 1.1.5:** a steadier picture. A large frame from the camera is no longer cut in two (that broke
 > the picture until the next keyframe).
@@ -42,8 +42,8 @@ without opening a video-call app.
 - Low latency: about 12 ms (median) from the first packet of a frame to the virtual camera, plus the
   camera's own capture and Wi-Fi delay.
 - Reconnects by itself if the video stops; puts your Wi-Fi back when it exits.
-- Tested with the Osmo Nano and the Osmo Action 4; every other Osmo Pocket and Osmo Action: see
-  [Compatibility](#compatibility).
+- Tested with the Osmo Nano, the Osmo Pocket 3 and the Osmo Action 4; every other Osmo Pocket and Osmo
+  Action: see [Compatibility](#compatibility).
 
 Want to take photos, change modes, ISO and formats, or download your files to your computer? See the
 companion app, **[Osmo Client](https://github.com/luisreysan/osmo-client)**.
@@ -60,7 +60,7 @@ welcome.
 |---|:---:|:---:|---|
 | **Osmo Nano** | ✅ | ✅ | The camera OsmoCam was built with. |
 | **Osmo Action 4** | ✅ | ✅ | Tested by [@stvdrag225](https://github.com/stvdrag225) on a Raspberry Pi 4 with v4l2loopback ([#1](https://github.com/luisreysan/osmo-client/issues/1)): about 77,000 frames without a decoding error. Thank you! |
-| Osmo Pocket 3 |  | ✅ | Tested with Osmo Client, which shares OsmoCam's connection code; not with OsmoCam yet. |
+| **Osmo Pocket 3** | ✅ | ✅ | Tested with a real camera: its live view (H.264, 1280×720). |
 | Osmo Pocket 4, 4P |  | ✅ | Live view (H.265); not tried on a real one yet. |
 | Osmo Pocket 2, Osmo Pocket |  | ❌ | No built-in Wi-Fi or Bluetooth (they need an accessory), and an older connection. |
 | Osmo Action 2, 3, 5 Pro, 6 |  | ✅ | Same connection as the Action 4; not tried yet. |
