@@ -19,18 +19,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import io
 import signal
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import av
 import numpy as np
 from bleak.exc import BleakError
 
-from camlink import ble, datalink, models, wifi
+from camlink import ble, datalink, models, preview, station, wifi
+from camlink.protocol import CAMERA_HOST
 from camlink.registry import DEFAULT_TRANSPORT, CameraRegistry, other_transport
 from camlink.util import fine_timer, log
 from camlink.video import VideoDecoder
@@ -70,9 +69,11 @@ class Latency:
 class Outputs:
     """Sends decoded frames to the virtual camera and keeps the latest one for the preview page."""
 
-    def __init__(self, use_vcam: bool, fps: int) -> None:
+    def __init__(self, use_vcam: bool, fps: int, rotation: int = 0, mirror: bool = False) -> None:
         self.use_vcam = use_vcam
         self.fps = fps
+        self.rotation = rotation
+        self.mirror = mirror
         self.cam = None
         self.latest: av.VideoFrame | None = None
         self.seq = 0
@@ -80,6 +81,23 @@ class Outputs:
         self.latency = Latency()
         self._vcam_lock = threading.Lock()   # the decoder thread sends while the main thread may close
         self._closed = False
+
+    def set_rotation(self, degrees: int) -> None:
+        if degrees in preview.VALID_ROTATIONS and degrees != self.rotation:
+            self.rotation = degrees
+            log(f"Rotation set to {degrees}° CW")
+            with self.cond:
+                self.seq += 1
+                self.cond.notify_all()
+
+    def set_mirror(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled != self.mirror:
+            self.mirror = enabled
+            log(f"Mirror {'ON' if enabled else 'OFF'}")
+            with self.cond:
+                self.seq += 1
+                self.cond.notify_all()
 
     def on_frame(self, frame: av.VideoFrame, first_packet: float = 0.0) -> None:
         if self.use_vcam:
@@ -117,7 +135,7 @@ class Outputs:
             if self._closed or self.cam is None:
                 return
             try:
-                self.cam.send(fit_i420(frame, self.cam.width, self.cam.height))
+                self.cam.send(fit_i420(frame, self.cam.width, self.cam.height, self.rotation, self.mirror))
             except Exception as error:  # noqa: BLE001 - the device went away: keep the preview page going
                 log(f"Virtual camera stopped: {error}")
                 self.use_vcam = False
@@ -133,11 +151,14 @@ class Outputs:
                 self.cam = None
 
 
-def fit_i420(frame: av.VideoFrame, width: int, height: int) -> np.ndarray:
-    """The frame as I420 at the virtual camera's size: scaled to fit and, when its shape differs (a 4:3
-    live view), centred between black bars instead of stretched."""
-    if (frame.width, frame.height) == (width, height):
+def fit_i420(frame: av.VideoFrame, width: int, height: int, rotation: int = 0, mirror: bool = False) -> np.ndarray:
+    """The frame as I420 at the virtual camera's size: optionally rotated clockwise (0/90/180/270) and
+    horizontally mirrored, scaled to fit and centred between black bars instead of stretched."""
+    if rotation == 0 and not mirror and (frame.width, frame.height) == (width, height):
         return (frame if frame.format.name == "yuv420p" else frame.reformat(format="yuv420p")).to_ndarray()
+    if rotation in (90, 180, 270) or mirror:
+        img = preview.rotate_image(frame.to_image(), rotation, mirror)
+        frame = av.VideoFrame.from_image(img)
     scale = min(width / frame.width, height / frame.height)
     w, h = max(2, int(frame.width * scale) & ~1), max(2, int(frame.height * scale) & ~1)
     planes = frame.reformat(width=w, height=h, format="yuv420p").to_ndarray().ravel()
@@ -149,59 +170,6 @@ def fit_i420(frame: av.VideoFrame, width: int, height: int) -> np.ndarray:
     for target, source in ((u, planes[w * h:w * h * 5 // 4]), (v, planes[w * h * 5 // 4:])):
         target.reshape(height // 2, width // 2)[y0 // 2:(y0 + h) // 2, x0 // 2:(x0 + w) // 2] = source.reshape(h // 2, w // 2)
     return out.reshape(height * 3 // 2, width)
-
-
-def start_preview(outputs: Outputs, port: int) -> None:
-    """A local page (127.0.0.1 only) with the live picture, to check framing without a video-call app."""
-    page = (b"<!doctype html><title>OsmoCam</title><body style='margin:0;background:#111;display:grid;"
-            b"place-items:center;height:100vh'><img src='/stream' style='max-width:100%;max-height:100vh'>")
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args) -> None:
-            pass
-
-        def do_GET(self) -> None:
-            if self.path == "/":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(page)
-                return
-            if self.path not in ("/stream", "/snapshot.jpg"):
-                self.send_error(404)
-                return
-            single = self.path == "/snapshot.jpg"
-            if not single:
-                self.send_response(200)
-                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-                self.end_headers()
-            last = -1
-            while True:
-                with outputs.cond:
-                    outputs.cond.wait_for(lambda: outputs.seq != last, timeout=2)
-                    frame, last = outputs.latest, outputs.seq
-                if frame is None:
-                    continue
-                buffer = io.BytesIO()
-                frame.to_image().save(buffer, "JPEG", quality=80)
-                jpeg = buffer.getvalue()
-                try:
-                    if single:
-                        self.send_response(200)
-                        self.send_header("Content-Type", "image/jpeg")
-                        self.send_header("Content-Length", str(len(jpeg)))
-                        self.end_headers()
-                        self.wfile.write(jpeg)
-                        return
-                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n"
-                                     % len(jpeg) + jpeg + b"\r\n")
-                except OSError:
-                    return
-                time.sleep(1 / 20)
-
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True, name="preview").start()
-    log(f"Preview: http://127.0.0.1:{port}/")
 
 
 async def scan(seconds: float) -> None:
@@ -218,15 +186,23 @@ async def scan(seconds: float) -> None:
 async def run(args: argparse.Namespace) -> None:
     if sys.platform != "win32":      # `kill` stops like Ctrl+C (on Linux, BlueZ would keep the camera's link)
         asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+    registry = CameraRegistry()
+    address = args.address or (registry.last_used() or {}).get("address")
+    station_ssid: str | None = None
+    station_password: str | None = None
+    if args.station is not None:
+        last_cam = registry.get(address) if address else registry.last_used()
+        station_ssid, station_password = station.resolve_station_network(
+            registry, args.station, args.station_pass, (last_cam or {}).get("network"))
+        log(f"Station mode target Wi-Fi: '{station_ssid}' (keep this computer connected to '{station_ssid}')")
+
     stop = threading.Event()
-    outputs = Outputs(not args.no_vcam, args.fps)
+    outputs = Outputs(not args.no_vcam, args.fps, args.rotate, args.mirror)
     await asyncio.to_thread(outputs.open_vcam)
     decoder = VideoDecoder(outputs.on_frame, stop)
     decoder.start()
     if args.preview_port:
-        start_preview(outputs, args.preview_port)
-    registry = CameraRegistry()
-    address = args.address or (registry.last_used() or {}).get("address")
+        preview.start_preview(outputs, args.preview_port, args.preview_fps)
     home = args.home or wifi.current_network(args.interface)
     if home.lower().startswith(models.NAME_PREFIXES):
         home = ""                    # started while still on a camera's network: nothing to return to
@@ -248,6 +224,19 @@ async def run(args: argparse.Namespace) -> None:
     try:
         link = await pair()
         address = link.address
+        camera = registry.get(address) or {}
+        prev_network = camera.get("network")
+        prev_host = camera.get("host")
+        if station_ssid is not None:
+            if prev_network != station_ssid or args.station_pass is not None or registry.network_password(station_ssid) is None:
+                registry.set_network(address, station_ssid, station_password)
+        elif args.ap or camera.get("in_station"):
+            log("Switching camera back to its own Wi-Fi access point...")
+            if await link.use_own_wifi():
+                log("Camera switched back to its own Wi-Fi access point")
+            registry.mark_station(address, False)
+            await asyncio.sleep(2.0)
+
         sessions = 0
         while not time_up():
             sessions += 1
@@ -260,21 +249,52 @@ async def run(args: argparse.Namespace) -> None:
                     link = None
             camera = registry.get(address) or {}
             ssid, password = camera.get("ssid"), camera.get("password")
-            joined = True
-            await asyncio.to_thread(wifi.join, ssid, password, args.join_timeout, args.interface)
             transport = camera.get("transport") or dict(DEFAULT_TRANSPORT)
+            port = transport.get("port", datalink.DATALINK_PORT)
+            if station_ssid is not None:
+                camera_host = args.station_host
+                if not camera_host:
+                    exclude = registry.station_hosts(address)
+                    if sessions > 1 or (camera.get("in_station") and prev_network == station_ssid):
+                        camera_host = await asyncio.to_thread(
+                            station.find_camera, ssid, port, prev_host, exclude, 4.0, args.interface)
+                    if not camera_host:
+                        if link is None or link.disconnected.is_set():
+                            link = await pair()
+                        log(f"Station mode: asking {ssid or 'camera'} to join '{station_ssid}'...")
+                        await link.join_network(
+                            station_ssid, station_password,
+                            progress=lambda msg: log(f"Station mode: {msg}"))
+                        registry.mark_station(address, True)
+                        prev_network = station_ssid
+                        camera_host = await asyncio.to_thread(
+                            station.find_camera, ssid, port, prev_host, exclude, 30.0, args.interface)
+                if not camera_host:
+                    if not time_up():
+                        await asyncio.sleep(2.0)
+                    continue
+                prev_host = camera_host
+                registry.set_host(address, camera_host)
+            else:
+                joined = True
+                await asyncio.to_thread(wifi.join, ssid, password, args.join_timeout, args.interface)
+                camera_host = CAMERA_HOST
             if transport.get("poke", True):
-                await asyncio.to_thread(datalink.poke)
-            session = datalink.Datalink(port=transport.get("port", datalink.DATALINK_PORT), on_video=decoder.feed,
+                await asyncio.to_thread(datalink.poke, camera_host)
+            session = datalink.Datalink(port=port, host=camera_host, on_video=decoder.feed,
                                         liveview=models.liveview_mode(camera.get("model_id")))
             decoder.reset()
             task = asyncio.ensure_future(asyncio.to_thread(session.run))
             started = time.monotonic()
+            ready_at: float | None = None
             report = (started, 0, 0)
             while not task.done():
                 await asyncio.sleep(0.5)
                 now = time.monotonic()
-                stalled = now - (session.last_video or started)
+                if ready_at is None and session.ready.is_set():
+                    ready_at = now
+                # Wait until the handshake finishes (it has its own timeout) before enforcing the video stall timer.
+                stalled = (now - (session.last_video or ready_at)) if ready_at is not None else 0.0
                 if time_up():
                     session.stop()
                 elif stalled > args.stall and not session.stopped.is_set():
@@ -326,10 +346,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-vcam", action="store_true", help="don't send the picture to the virtual camera")
     parser.add_argument("--preview-port", type=int, default=8090, help="port of the preview page (0 = off)")
+    parser.add_argument("--preview-fps", type=int, default=30, help="frame rate of the preview page /stream")
+    parser.add_argument("--rotate", type=int, choices=preview.VALID_ROTATIONS, default=0,
+                        help="rotate video clockwise in degrees (0, 90, 180, 270); can also be changed live at /control")
+    parser.add_argument("--mirror", action="store_true",
+                        help="flip video horizontally (mirror); can also be toggled live at /control")
     parser.add_argument("--fps", type=int, default=30, help="frame rate announced to the virtual camera")
     parser.add_argument("--scan", action="store_true", help="list the DJI Osmo cameras nearby and exit")
     parser.add_argument("--address", help="Bluetooth address of the camera, as --scan lists it (default: the one "
                                           "used last, else the first DJI Osmo found)")
+    parser.add_argument("--station", nargs="?", const="", default=None, metavar="SSID",
+                        help="have the camera join a shared Wi-Fi network (cafe Wi-Fi or iPhone Hotspot) so this "
+                             "computer keeps internet; omit SSID to pick from saved networks")
+    parser.add_argument("--station-pass", help="password for the --station Wi-Fi network (saved in cameras.json)")
+    parser.add_argument("--station-host", help="camera IP on the shared network (skips subnet scan in --station mode)")
+    parser.add_argument("--ap", action="store_true",
+                        help="switch the camera back to its own Wi-Fi access point (after --station)")
     parser.add_argument("--interface", help="Wi-Fi adapter to use: 'Wi-Fi 2' on Windows, en0 on macOS, wlan0 "
                                             "on Linux (default: the first one)")
     parser.add_argument("--home", help="Wi-Fi network to return to (default: the current one)")
@@ -347,7 +379,7 @@ def main() -> None:
     except BleakError as error:
         log(f"Bluetooth is not available: {error} ({ble.UNAVAILABLE_HINT})")
         sys.exit(1)
-    except wifi.WifiError as error:
+    except (wifi.WifiError, ble.JoinRefused, ValueError) as error:
         log(f"Could not connect over Wi-Fi: {error}")
         sys.exit(1)
 
