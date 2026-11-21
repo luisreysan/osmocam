@@ -69,10 +69,11 @@ class Latency:
 class Outputs:
     """Sends decoded frames to the virtual camera and keeps the latest one for the preview page."""
 
-    def __init__(self, use_vcam: bool, fps: int, rotation: int = 0) -> None:
+    def __init__(self, use_vcam: bool, fps: int, rotation: int = 0, mirror: bool = False) -> None:
         self.use_vcam = use_vcam
         self.fps = fps
         self.rotation = rotation
+        self.mirror = mirror
         self.cam = None
         self.latest: av.VideoFrame | None = None
         self.seq = 0
@@ -85,6 +86,15 @@ class Outputs:
         if degrees in preview.VALID_ROTATIONS and degrees != self.rotation:
             self.rotation = degrees
             log(f"Rotation set to {degrees}° CW")
+            with self.cond:
+                self.seq += 1
+                self.cond.notify_all()
+
+    def set_mirror(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled != self.mirror:
+            self.mirror = enabled
+            log(f"Mirror {'ON' if enabled else 'OFF'}")
             with self.cond:
                 self.seq += 1
                 self.cond.notify_all()
@@ -125,7 +135,7 @@ class Outputs:
             if self._closed or self.cam is None:
                 return
             try:
-                self.cam.send(fit_i420(frame, self.cam.width, self.cam.height, self.rotation))
+                self.cam.send(fit_i420(frame, self.cam.width, self.cam.height, self.rotation, self.mirror))
             except Exception as error:  # noqa: BLE001 - the device went away: keep the preview page going
                 log(f"Virtual camera stopped: {error}")
                 self.use_vcam = False
@@ -141,13 +151,13 @@ class Outputs:
                 self.cam = None
 
 
-def fit_i420(frame: av.VideoFrame, width: int, height: int, rotation: int = 0) -> np.ndarray:
-    """The frame as I420 at the virtual camera's size: optionally rotated clockwise (0/90/180/270),
-    scaled to fit and centred between black bars instead of stretched."""
-    if rotation == 0 and (frame.width, frame.height) == (width, height):
+def fit_i420(frame: av.VideoFrame, width: int, height: int, rotation: int = 0, mirror: bool = False) -> np.ndarray:
+    """The frame as I420 at the virtual camera's size: optionally rotated clockwise (0/90/180/270) and
+    horizontally mirrored, scaled to fit and centred between black bars instead of stretched."""
+    if rotation == 0 and not mirror and (frame.width, frame.height) == (width, height):
         return (frame if frame.format.name == "yuv420p" else frame.reformat(format="yuv420p")).to_ndarray()
-    if rotation in (90, 180, 270):
-        img = preview.rotate_image(frame.to_image(), rotation)
+    if rotation in (90, 180, 270) or mirror:
+        img = preview.rotate_image(frame.to_image(), rotation, mirror)
         frame = av.VideoFrame.from_image(img)
     scale = min(width / frame.width, height / frame.height)
     w, h = max(2, int(frame.width * scale) & ~1), max(2, int(frame.height * scale) & ~1)
@@ -187,7 +197,7 @@ async def run(args: argparse.Namespace) -> None:
         log(f"Station mode target Wi-Fi: '{station_ssid}' (keep this computer connected to '{station_ssid}')")
 
     stop = threading.Event()
-    outputs = Outputs(not args.no_vcam, args.fps, args.rotate)
+    outputs = Outputs(not args.no_vcam, args.fps, args.rotate, args.mirror)
     await asyncio.to_thread(outputs.open_vcam)
     decoder = VideoDecoder(outputs.on_frame, stop)
     decoder.start()
@@ -339,6 +349,8 @@ def main() -> None:
     parser.add_argument("--preview-fps", type=int, default=30, help="frame rate of the preview page /stream")
     parser.add_argument("--rotate", type=int, choices=preview.VALID_ROTATIONS, default=0,
                         help="rotate video clockwise in degrees (0, 90, 180, 270); can also be changed live at /control")
+    parser.add_argument("--mirror", action="store_true",
+                        help="flip video horizontally (mirror); can also be toggled live at /control")
     parser.add_argument("--fps", type=int, default=30, help="frame rate announced to the virtual camera")
     parser.add_argument("--scan", action="store_true", help="list the DJI Osmo cameras nearby and exit")
     parser.add_argument("--address", help="Bluetooth address of the camera, as --scan lists it (default: the one "
