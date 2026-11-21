@@ -12,7 +12,7 @@ import socket
 import sys
 import time
 
-from ..protocol import CAMERA_HOST, CAMERA_SUBNET
+from ..protocol import CAMERA_HOST, CAMERA_SUBNET, POKE_PORT
 from ..util import log
 from .errors import JoinByHand, NoWifi, WifiError  # noqa: F401 - part of this package's interface
 
@@ -68,19 +68,33 @@ def current_network(interface: str | None = None) -> str:
         return ""
 
 
+def _camera_reachable(timeout: float = 0.6) -> bool:
+    """True when CAMERA_HOST accepts TCP POKE_PORT (distinguishes a camera from a router on 192.168.2.1)."""
+    try:
+        with socket.create_connection((CAMERA_HOST, POKE_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def join(ssid: str, password: str, timeout: float = 45, interface: str | None = None) -> str:
     """Connect the Wi-Fi adapter to the camera's access point; returns the computer's address on it."""
     global _camera_ssid
     _camera_ssid = ssid
     # Another camera's network has the same addresses: from there, wait until the system names this one.
+    # When the OS hides the current SSID (e.g. macOS 15+), verify 192.168.2.1 is actually the camera so a
+    # router using 192.168.2.0/24 is not mistaken for the camera's access point.
     other = ""
     if local_ip_towards(CAMERA_HOST).startswith(CAMERA_SUBNET):
         other = current_network(interface)
-        if not other or _named(other, ssid):
+        if _named(other, ssid) or (not other and _camera_reachable()):
             ip = local_ip_towards(CAMERA_HOST)
             log(f"Already on the camera network ({ip})")
             return ip
-        log(f"On {other}, another camera's network: moving to {ssid}")
+        if other:
+            log(f"On {other}, another camera's network: moving to {ssid}")
+        else:
+            log(f"Local network also uses {CAMERA_SUBNET}x, but camera is not at {CAMERA_HOST}: moving to {ssid}")
     try:
         try:
             name = adapter_name(interface)
@@ -95,10 +109,20 @@ def join(ssid: str, password: str, timeout: float = 45, interface: str | None = 
         while time.monotonic() < deadline:
             result = _system.connect(ssid, password, name)
             log(f"Joining {ssid} on {name}: {result[:100]}")
+            # On macOS when SSID is hidden and the previous network also used 192.168.2.x, don't treat an
+            # immediate join failure as connected just because the old IP is still on 192.168.2.x.
+            failed_msg = bool(result) and result != "requested" and any(
+                w in result.lower() for w in ("could not find", "failed", "error", "no answer"))
+            if failed_msg:
+                time.sleep(2)
+                continue
             for _ in range(8):
                 time.sleep(1)
                 ip = local_ip_towards(CAMERA_HOST)
-                if ip.startswith(CAMERA_SUBNET) and (not other or _named(current_network(interface), ssid)):
+                if ip.startswith(CAMERA_SUBNET) and (
+                    _named(current_network(interface), ssid)
+                    or (not other and (result == "requested" or _camera_reachable()))
+                ):
                     log(f"Joined {ssid} ({ip})")
                     return ip
     except WifiError:
