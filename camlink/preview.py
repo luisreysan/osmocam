@@ -45,16 +45,16 @@ _CONTROL_HTML = """<!doctype html>
   code{background:#222;padding:2px 6px;border-radius:4px;color:#ddd}
 </style>
 <div class="bar" id="btns">
-  <button data-deg="0">0° Ngang</button>
-  <button data-deg="90">90° CW (Dọc)</button>
-  <button data-deg="180">180° Ngược</button>
-  <button data-deg="270">270° CCW (Dọc)</button>
-  <button id="mirrorBtn" type="button">⇄ Lật gương (Mirror)</button>
+  <button data-deg="0">0° Landscape</button>
+  <button data-deg="90">90° CW</button>
+  <button data-deg="180">180°</button>
+  <button data-deg="270">270° CCW</button>
+  <button id="mirrorBtn" type="button">⇄ Mirror: OFF</button>
 </div>
 <img id="view" src="/stream" alt="OsmoCam live view">
 <div class="hint">
-  OBS theo nút bấm live: <code>http://127.0.0.1:PORT/</code><br>
-  OBS cố định URL: <code>http://127.0.0.1:PORT/?rotate=90&amp;mirror=1</code> (thêm <code>mirror=0</code> hoặc <code>1</code>)
+  OBS live-controlled URL: <code>http://127.0.0.1:PORT/</code><br>
+  OBS fixed URL: <code>http://127.0.0.1:PORT/?rotate=90&amp;mirror=1</code> (<code>rotate=0|90|180|270</code>, <code>mirror=0|1</code>)
 </div>
 <script>
   const rotBtns = [...document.querySelectorAll('#btns button[data-deg]')];
@@ -63,7 +63,7 @@ _CONTROL_HTML = """<!doctype html>
   function render(){
     rotBtns.forEach(b => b.classList.toggle('active', Number(b.dataset.deg) === state.rotation));
     mirrorBtn.classList.toggle('active', Boolean(state.mirror));
-    mirrorBtn.textContent = state.mirror ? '⇄ Mirror: BẬT' : '⇄ Mirror: TẮT';
+    mirrorBtn.textContent = state.mirror ? '⇄ Mirror: ON' : '⇄ Mirror: OFF';
   }
   async function update(query){
     const r = await fetch('/api/rotate?' + query);
